@@ -27,7 +27,9 @@ def make_event(
     if visitor_id is None:
         visitor_id = f"VIS_{uuid.uuid4().hex[:6]}"
 
-    if event_type in ("ENTRY", "EXIT"):
+    # zone_id rules: null for threshold events (ENTRY / EXIT / REENTRY),
+    # required for everything else.
+    if event_type in ("ENTRY", "EXIT", "REENTRY"):
         zone_id = None
     elif zone_id is None:
         zone_id = "SKINCARE"

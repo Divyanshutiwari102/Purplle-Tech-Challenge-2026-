@@ -19,6 +19,23 @@ open http://localhost:8501          # dashboard (use `start` on Windows)
 - **Dashboard** — http://localhost:8501
 - **Health** — http://localhost:8000/health
 
+### Real store ID
+
+The repo ships with a real anonymised POS file at `data/sample_pos_transactions.csv`
+(24 transactions from **ST1008 / Brigade_Bangalore**, 10-Apr-2026, ₹34,331.71 in
+total revenue). After the API is up, you can test against the real store id:
+
+```bash
+curl http://localhost:8000/stores/ST1008/metrics
+curl http://localhost:8000/stores/ST1008/funnel
+```
+
+`data/sample_events.json` includes a 5-event journey
+(ENTRY → ZONE_ENTER → ZONE_DWELL → BILLING_QUEUE_JOIN → EXIT) for `ST1008`
+on 2026-04-10. Combined with the real POS rows it produces a
+`conversion_rate = 1.0` for that window — the visitor was in the billing zone
+within 5 minutes of a real transaction.
+
 ## What's running
 
 | Service     | Port | Purpose                             |

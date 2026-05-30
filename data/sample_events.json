@@ -64,6 +64,72 @@
       "is_staff": false,
       "confidence": 0.92,
       "metadata": {"queue_depth": null, "sku_zone": null, "session_seq": 5}
+    },
+
+    {
+      "event_id": "aaaaaaaa-1008-4111-8111-aaaaaaaaaaaa",
+      "store_id": "ST1008",
+      "camera_id": "CAM_ENTRY_01",
+      "visitor_id": "VIS_brigade01",
+      "event_type": "ENTRY",
+      "timestamp": "2026-04-10T11:15:30Z",
+      "zone_id": null,
+      "dwell_ms": 0,
+      "is_staff": false,
+      "confidence": 0.94,
+      "metadata": {"queue_depth": null, "sku_zone": null, "session_seq": 1}
+    },
+    {
+      "event_id": "bbbbbbbb-1008-4222-8222-bbbbbbbbbbbb",
+      "store_id": "ST1008",
+      "camera_id": "CAM_FLOOR_01",
+      "visitor_id": "VIS_brigade01",
+      "event_type": "ZONE_ENTER",
+      "timestamp": "2026-04-10T11:18:05Z",
+      "zone_id": "MAKEUP",
+      "dwell_ms": 0,
+      "is_staff": false,
+      "confidence": 0.90,
+      "metadata": {"queue_depth": null, "sku_zone": "MAKEUP", "session_seq": 2}
+    },
+    {
+      "event_id": "cccccccc-1008-4333-8333-cccccccccccc",
+      "store_id": "ST1008",
+      "camera_id": "CAM_FLOOR_01",
+      "visitor_id": "VIS_brigade01",
+      "event_type": "ZONE_DWELL",
+      "timestamp": "2026-04-10T11:18:35Z",
+      "zone_id": "MAKEUP",
+      "dwell_ms": 30000,
+      "is_staff": false,
+      "confidence": 0.89,
+      "metadata": {"queue_depth": null, "sku_zone": "MAKEUP", "session_seq": 3}
+    },
+    {
+      "event_id": "dddddddd-1008-4444-8444-dddddddddddd",
+      "store_id": "ST1008",
+      "camera_id": "CAM_BILLING_01",
+      "visitor_id": "VIS_brigade01",
+      "event_type": "BILLING_QUEUE_JOIN",
+      "timestamp": "2026-04-10T11:23:00Z",
+      "zone_id": "BILLING",
+      "dwell_ms": 0,
+      "is_staff": false,
+      "confidence": 0.92,
+      "metadata": {"queue_depth": 3, "sku_zone": "BILLING", "session_seq": 4}
+    },
+    {
+      "event_id": "eeeeeeee-1008-4555-8555-eeeeeeeeeeee",
+      "store_id": "ST1008",
+      "camera_id": "CAM_ENTRY_01",
+      "visitor_id": "VIS_brigade01",
+      "event_type": "EXIT",
+      "timestamp": "2026-04-10T11:30:00Z",
+      "zone_id": null,
+      "dwell_ms": 0,
+      "is_staff": false,
+      "confidence": 0.93,
+      "metadata": {"queue_depth": null, "sku_zone": null, "session_seq": 5}
     }
   ]
 }
