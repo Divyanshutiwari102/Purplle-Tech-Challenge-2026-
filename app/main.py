@@ -27,10 +27,13 @@ from pydantic import ValidationError
 from . import anomalies as anomalies_mod
 from . import health as health_mod
 from . import metrics as metrics_mod
+from .camera_stream import router as camera_router
+from .dashboard import broadcast_update, router as dashboard_router
 from .db import OperationalError, init_db
 from .ingestion import ingest_events
 from .logging_mw import StructuredLoggingMiddleware
 from .models import Event, IngestError, IngestRequest, IngestResponse
+from .simulation import router as simulation_router
 
 # Quiet uvicorn's default access log; we have our own.
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -41,6 +44,26 @@ app = FastAPI(
     description="Real-time analytics for offline retail stores.",
 )
 app.add_middleware(StructuredLoggingMiddleware)
+
+# Permissive CORS so the React frontend (and the simulated camera UI)
+# can talk to us from a different origin during development.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# SSE endpoint(s)
+app.include_router(dashboard_router)
+
+# Simulated YOLO MJPEG camera stream
+app.include_router(camera_router)
+
+# Simulation manager (replay events, control speed, broadcast SSE)
+app.include_router(simulation_router)
 
 
 @app.on_event("startup")
@@ -112,6 +135,27 @@ async def ingest(request: Request) -> IngestResponse:
 
     request.state.event_count = len(raw_events)
     ingested, duplicates, errors = ingest_events(valid, pre_errors=errors)
+
+    # Fan-out per-store metric updates to SSE subscribers.
+    if ingested > 0:
+        # Group ingested events by store so each store's subscribers
+        # only get the slice that's relevant to them.
+        per_store: Dict[str, int] = {}
+        for ev in valid:
+            per_store[ev.store_id] = per_store.get(ev.store_id, 0) + 1
+        for sid, count in per_store.items():
+            try:
+                payload = {
+                    "type": "metrics",
+                    "store_id": sid,
+                    "ingested": count,
+                    "metrics": metrics_mod.store_metrics(sid),
+                }
+                broadcast_update(sid, payload)
+            except Exception:
+                # Never let a broadcast failure break ingest.
+                pass
+
     return IngestResponse(ingested=ingested, duplicates=duplicates, errors=errors)
 
 

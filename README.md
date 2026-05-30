@@ -1,7 +1,7 @@
 # Store Intelligence
 
 Real-time analytics for offline retail. Raw CCTV → structured events →
-queryable REST API → live dashboard.
+queryable REST API → live React dashboard with simulated YOLO camera feed.
 
 ## Quickstart (5 commands)
 
@@ -9,138 +9,164 @@ queryable REST API → live dashboard.
 git clone <this-repo>.git store-intelligence && cd store-intelligence
 docker compose up -d --build
 curl -s http://localhost:8000/health | python -m json.tool
-curl -s -X POST http://localhost:8000/events/ingest \
-  -H 'Content-Type: application/json' \
-  --data-binary @data/sample_events.json | python -m json.tool
-open http://localhost:8501          # dashboard (use `start` on Windows)
+curl -X POST "http://localhost:8000/simulation/start?speed=1"
+open http://localhost:3030     # React dashboard (use `start` on Windows)
 ```
 
-- **API** — http://localhost:8000  (OpenAPI at `/docs`)
-- **Dashboard** — http://localhost:8501
-- **Health** — http://localhost:8000/health
+| Service                | URL                                   | Purpose                                              |
+| ---------------------- | ------------------------------------- | ---------------------------------------------------- |
+| **Dashboard (React)**  | http://localhost:3030                 | Primary UI: KPIs, funnel, heatmap, MJPEG, anomalies  |
+| **API**                | http://localhost:8000                 | REST + SSE + MJPEG + simulation                      |
+| **API Docs (Swagger)** | http://localhost:8000/docs            | Interactive endpoint explorer                        |
+| **Streamlit (legacy)** | http://localhost:8501                 | Fallback UI, kept for parity                         |
 
-### Real store ID
+## Real store IDs
 
-The repo ships with a real anonymised POS file at `data/sample_pos_transactions.csv`
-(24 transactions from **ST1008 / Brigade_Bangalore**, 10-Apr-2026, ₹34,331.71 in
-total revenue). After the API is up, you can test against the real store id:
+The repo ships with two store ids the evaluator can drive against:
+
+| Store ID         | Provenance                                                              |
+| ---------------- | ----------------------------------------------------------------------- |
+| `STORE_BLR_002`  | Synthetic store used by the suggested layout and sample CCTV pipeline   |
+| `ST1008`         | **Real anonymised data**: Brigade Bangalore, 10-Apr-2026, 24 transactions, ₹34,331.71 |
+
+Test against the real store id:
 
 ```bash
 curl http://localhost:8000/stores/ST1008/metrics
 curl http://localhost:8000/stores/ST1008/funnel
+curl http://localhost:8000/stores/ST1008/heatmap
+curl http://localhost:8000/stores/ST1008/anomalies
 ```
 
-`data/sample_events.json` includes a 5-event journey
-(ENTRY → ZONE_ENTER → ZONE_DWELL → BILLING_QUEUE_JOIN → EXIT) for `ST1008`
-on 2026-04-10. Combined with the real POS rows it produces a
-`conversion_rate = 1.0` for that window — the visitor was in the billing zone
-within 5 minutes of a real transaction.
+The committed `data/sample_pos_transactions.csv` is derived from the real
+Brigade POS file (PII stripped — only `store_id, transaction_id, timestamp,
+basket_value_inr`). The raw CSV with customer names + phone numbers is
+**git-ignored** and never pushed.
 
-## What's running
+## Live demo with simulation
 
-| Service     | Port | Purpose                             |
-| ----------- | ---- | ----------------------------------- |
-| `api`       | 8000 | FastAPI + SQLite (WAL)              |
-| `dashboard` | 8501 | Streamlit, refreshes every 5s       |
-
-A named volume `store-data` holds the SQLite file across restarts.
-
-## Run the detection pipeline against the clips
-
-The pipeline is packaged separately because it carries the heavier
-computer-vision dependencies (torch, ultralytics, OpenCV). It can be
-run on a workstation and the events POSTed to the API container.
+The simulation manager replays events into the API at controllable speed and
+broadcasts each one to subscribers over SSE — so the dashboard fills in even
+without running the heavy detection pipeline.
 
 ```bash
-# 1. Install pipeline deps (once, on the host or a build container)
-pip install -r requirements.txt
+# Start a 5x replay against any camera
+curl -X POST "http://localhost:8000/simulation/start?speed=5&cam_id=CAM_1"
 
-# 2. Process every clip in data/clips and emit JSONL into data/events
-./pipeline/run.sh data/clips data/layout/store_layout.json
+# Slow it down on the fly
+curl -X POST "http://localhost:8000/simulation/speed?speed=1"
 
-# 3. Replay those events into the API
-python -m pipeline.replay --events-dir data/events --api http://localhost:8000
-
-# 4. (optional) simulate real-time for the dashboard demo
-python -m pipeline.replay --events-dir data/events --api http://localhost:8000 --rate 5
+# Stop
+curl -X POST http://localhost:8000/simulation/stop
 ```
 
-`pipeline/run.sh` discovers stores by parsing clip filenames of the
-form `STORE_BLR_002_CAM_ENTRY_01.mp4`. Layout and zones come from
-`data/layout/store_layout.json` (sample committed in this repo).
+The dashboard's "▶ Start" buttons trigger the same endpoints from the UI.
+
+## Run the detection pipeline against your own clips
+
+The pipeline is heavier (carries torch + ultralytics + cv2) and is packaged
+separately. It can run on any workstation; events are POSTed to the API
+container.
+
+```bash
+# 1. Install pipeline deps (once, on the host)
+pip install -r requirements.txt
+
+# 2. Process every .mp4 in data/clips/ (filenames map to cameras via
+#    data/layout/store_layout.json::clip_to_camera)
+python -m pipeline.detect \
+  --store-id STORE_BLR_002 \
+  --layout data/layout/store_layout.json \
+  --clips-dir data/clips \
+  --frame-stride 5
+
+# 3. Replay the resulting JSONL into the API
+python -m pipeline.replay --events-dir data/events --api http://localhost:8000
+
+# Or one shot:
+./pipeline/run.sh data/clips data/layout/store_layout.json
+```
 
 ## Verify the system is working
 
 ```bash
-# Liveness + DB
+# Liveness
 curl http://localhost:8000/health
 
-# Ingest a single event (works even before the pipeline runs)
+# One-line ingest of the committed sample
 curl -X POST http://localhost:8000/events/ingest \
   -H 'Content-Type: application/json' \
-  -d '{"events":[{"event_id":"d1f4f5b8-1f3c-4f8a-9f9b-aaaaaaaaaaaa",
-       "store_id":"STORE_BLR_002","camera_id":"CAM_ENTRY_01",
-       "visitor_id":"VIS_demo","event_type":"ENTRY",
-       "timestamp":"2026-05-30T12:00:00Z","zone_id":null,
-       "dwell_ms":0,"is_staff":false,"confidence":0.95,
-       "metadata":{"queue_depth":null,"sku_zone":null,"session_seq":1}}]}'
+  --data-binary @data/sample_events.json
 
-# Read back the metrics
-curl http://localhost:8000/stores/STORE_BLR_002/metrics
-curl http://localhost:8000/stores/STORE_BLR_002/funnel
-curl http://localhost:8000/stores/STORE_BLR_002/heatmap
-curl http://localhost:8000/stores/STORE_BLR_002/anomalies
+# Real-time SSE feed (Ctrl-C to stop)
+curl -N http://localhost:8000/stores/STORE_BLR_002/stream
+
+# Simulated MJPEG camera
+curl -N http://localhost:8000/cameras/stream/CAM_1 -o frame.mjpeg
+
+# POS loader (re-ingest a CSV after the fact)
+docker exec store-intel-api python -m app.pos_loader \
+  --csv /data/sample_pos_transactions.csv --db /data/store_intel.db
 ```
+
+## Endpoints
+
+| Method | Path                                | Purpose                                                |
+| ------ | ----------------------------------- | ------------------------------------------------------ |
+| POST   | `/events/ingest`                    | Ingest a batch (≤ 500). Idempotent by `event_id`       |
+| GET    | `/stores/{id}/metrics`              | KPIs: visitors, conversion, queue, abandonment         |
+| GET    | `/stores/{id}/funnel`               | Entry → Zone → Billing → Purchase, with drop-off %     |
+| GET    | `/stores/{id}/heatmap`              | Per-zone visit frequency + dwell + data confidence     |
+| GET    | `/stores/{id}/anomalies`            | Active queue spikes, dead zones, stale cameras         |
+| GET    | `/stores/{id}/stream`               | **SSE** of metric + sim_event updates                  |
+| GET    | `/cameras`                          | Camera ids available for streaming                     |
+| GET    | `/cameras/stream/{cam_id}`          | **MJPEG** simulated YOLO feed with bbox + zone overlay |
+| POST   | `/simulation/start?speed=&cam_id=`  | Start replay at given speed                            |
+| POST   | `/simulation/stop`                  | Stop replay                                            |
+| POST   | `/simulation/speed?speed=`          | Change replay speed live                               |
+| GET    | `/simulation/status`                | Current state                                          |
+| GET    | `/health`                           | Status, last-event timestamps, stale feeds             |
 
 ## Running the test suite
 
 ```bash
 pip install -r requirements.txt
-pytest -q --cov=app --cov=pipeline --cov-report=term-missing
+pytest -q --tb=short
 ```
 
-Each test file's first lines are a `# PROMPT:` block (the AI prompt I
-used to bootstrap the file) and a `# CHANGES MADE:` block (what I
-edited afterwards and why).
+Currently **66+ tests** spread across 8 files. Each file's first lines are a
+`# PROMPT:` block (the AI prompt that bootstrapped it) and a `# CHANGES MADE:`
+block (what was edited afterwards and why).
 
 ## Layout
 
 ```
 store-intelligence/
-├── pipeline/
-│   ├── detect.py      # YOLOv8 + IoU tracker + Re-ID + zone classification
-│   ├── tracker.py     # Re-ID and staff heuristic
-│   ├── emit.py        # event builder + JSONL writer
-│   ├── replay.py      # POST JSONL to the API
-│   └── run.sh         # one command, all stores
 ├── app/
-│   ├── main.py        # FastAPI entrypoint
-│   ├── models.py      # Pydantic v2 event schema + validators
-│   ├── ingestion.py   # validate, dedup, persist
-│   ├── metrics.py     # /metrics, /funnel, /heatmap, POS correlation
-│   ├── funnel.py      # re-export to keep suggested layout
-│   ├── anomalies.py   # /anomalies — queue spike, dead zone, …
-│   ├── health.py      # /health
-│   ├── logging_mw.py  # structured-log middleware (trace_id, latency_ms)
-│   ├── db.py          # sqlite3 connection helpers
-│   └── schema.sql     # tables, indexes, CHECK constraints
-├── dashboard/
-│   └── app.py         # Streamlit, polls API every 5s
-├── tests/
-│   ├── test_pipeline.py   # edge cases from the problem statement
-│   ├── test_metrics.py    # zero purchases, re-entry, dedup, POS corr
-│   ├── test_anomalies.py  # queue spike, dead zone, stale camera, /health
-│   └── test_models.py     # Pydantic validation rules
-├── docs/
-│   ├── DESIGN.md      # architecture + AI-Assisted Decisions
-│   └── CHOICES.md     # 3 decisions with full reasoning
+│   ├── main.py            FastAPI entrypoint, CORS, routers
+│   ├── models.py          Pydantic v2 event schema + validators
+│   ├── ingestion.py       validate / dedup / persist
+│   ├── metrics.py         /metrics, /funnel, /heatmap + POS correlation
+│   ├── anomalies.py       queue spike, dead zone, stale camera, conv drop
+│   ├── health.py          /health
+│   ├── dashboard.py       /stores/{id}/stream (SSE)
+│   ├── camera_stream.py   /cameras + /cameras/stream/{cam_id} (MJPEG)
+│   ├── simulation.py      /simulation/* control plane
+│   ├── pos_loader.py      CSV loader (simple + Brigade format)
+│   ├── logging_mw.py      structured-log middleware
+│   ├── db.py              sqlite3 helpers (WAL)
+│   └── schema.sql         tables, indexes, CHECK constraints
+├── pipeline/              YOLOv8 + tracker + Re-ID + emit + replay
+├── frontend/              React + Vite + TS + Tailwind dashboard
+├── dashboard/app.py       Streamlit (legacy)
+├── tests/                 8 test files, 66+ tests
+├── docs/                  DESIGN.md (3669 words) + CHOICES.md
 ├── data/
-│   ├── sample_events.json     # works with curl, see Quickstart
+│   ├── sample_events.json (incl. ST1008 events for evaluator)
+│   ├── sample_pos_transactions.csv  (24 real Brigade transactions)
 │   └── layout/store_layout.json
-├── docker-compose.yml
-├── Dockerfile.api
-├── Dockerfile.dashboard
-├── Dockerfile.pipeline
+├── docker-compose.yml     api + frontend + dashboard
+├── Dockerfile.api / .frontend / .dashboard / .pipeline
 └── README.md
 ```
 
@@ -149,17 +175,19 @@ store-intelligence/
 | Env var                        | Default                  | Notes                                |
 | ------------------------------ | ------------------------ | ------------------------------------ |
 | `STORE_INTEL_DB`               | `/data/store_intel.db`   | SQLite path inside the API container |
-| `STORE_INTEL_API`              | `http://api:8000`        | Dashboard → API URL                  |
-| `STORE_INTEL_DEFAULT_STORE`    | `STORE_BLR_002`          | Initial store shown in the dashboard |
-| `STORE_INTEL_REFRESH`          | `5`                      | Dashboard refresh interval (s)       |
+| `STORE_INTEL_API`              | `http://api:8000`        | Streamlit dashboard → API URL        |
+| `STORE_INTEL_DEFAULT_STORE`    | `STORE_BLR_002`          | Initial store shown in Streamlit     |
+| `STORE_INTEL_REFRESH`          | `5`                      | Streamlit refresh interval (s)       |
+| `VITE_API_BASE` (frontend)     | `/api`                   | React proxy base                     |
 
 ## Troubleshooting
 
-- **`/health` returns `degraded`** — DB is unreachable. Inspect the API
-  logs (`docker compose logs api`).
-- **Dashboard says "Cannot reach API"** — the dashboard waits for the
-  API healthcheck to pass; start them with `docker compose up -d` and
-  give it ~15s.
-- **Pipeline fails on `import ultralytics`** — install the heavier
-  pipeline requirements: `pip install -r requirements.txt`. The API
-  itself does not need ultralytics.
+- **Dashboard says "API error: ..."** — the React dev server expects the API
+  on `/api/*`. In docker-compose, `nginx` proxies that. Locally with
+  `npm run dev`, the Vite proxy forwards to `http://localhost:8000`.
+- **Pipeline fails on `import ultralytics`** — install the heavier pipeline
+  requirements: `pip install -r requirements.txt`.
+- **`/health` returns `degraded`** — DB unreachable. Check
+  `docker compose logs api`.
+- **Port 3000 / 8000 / 8501 in use** — change the host port mapping in
+  `docker-compose.yml` (the container ports are fine).

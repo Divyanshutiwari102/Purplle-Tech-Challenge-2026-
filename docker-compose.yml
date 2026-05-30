@@ -1,8 +1,9 @@
 # docker-compose.yml
 #
-# `docker compose up` starts:
-#   • api       → FastAPI on http://localhost:8000
-#   • dashboard → Streamlit on http://localhost:8501
+# `docker compose up` starts the full stack:
+#   • api       → FastAPI on http://localhost:8000  (REST + SSE + MJPEG + simulation)
+#   • frontend  → React + nginx on http://localhost:3000  (proxies /api/* → api:8000)
+#   • dashboard → Streamlit on http://localhost:8501  (kept as a fallback for evaluators)
 #
 # A named volume `store-data` holds the SQLite database and event JSONLs
 # so they survive container restarts.
@@ -28,6 +29,26 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: store-intelligence-frontend:latest
+    container_name: store-intel-frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3030:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+    restart: unless-stopped
+
+  # Streamlit dashboard kept around as a fallback path.
   dashboard:
     build:
       context: .
