@@ -1,0 +1,66 @@
+{
+  "stores": {
+    "STORE_BLR_002": {
+      "name": "Apex Bengaluru #2",
+      "timezone": "Asia/Kolkata",
+      "open_hours": {
+        "mon": ["10:00", "21:00"], "tue": ["10:00", "21:00"],
+        "wed": ["10:00", "21:00"], "thu": ["10:00", "21:00"],
+        "fri": ["10:00", "22:00"], "sat": ["10:00", "22:00"],
+        "sun": ["11:00", "21:00"]
+      },
+      "clip_to_camera": {
+        "CAM 1.mp4": "CAM_ENTRY_01",
+        "CAM 2.mp4": "CAM_FLOOR_01",
+        "CAM 3.mp4": "CAM_FLOOR_02",
+        "CAM 4.mp4": "CAM_BILLING_01",
+        "CAM 5.mp4": "CAM_BILLING_02"
+      },
+      "cameras": {
+        "CAM_ENTRY_01": {
+          "role": "ENTRY",
+          "_classification_reason": "narrow x-spread + low person count + door-width geometry",
+          "frame_size": [1920, 1080],
+          "entry_line_y": 540,
+          "zones": []
+        },
+        "CAM_FLOOR_01": {
+          "role": "FLOOR",
+          "_classification_reason": "highest person count + spatial spread = busy main aisle",
+          "frame_size": [1920, 1080],
+          "zones": [
+            {"zone_id": "SKINCARE",     "polygon": [[0,    0], [960,  0], [960,  540], [0,    540]]},
+            {"zone_id": "MOISTURISER",  "polygon": [[960,  0], [1920, 0], [1920, 540], [960,  540]]},
+            {"zone_id": "FRAGRANCE",    "polygon": [[0,  540], [960, 540], [960, 1080], [0,  1080]]},
+            {"zone_id": "MAKEUP",       "polygon": [[960,540], [1920,540], [1920,1080], [960,1080]]}
+          ]
+        },
+        "CAM_FLOOR_02": {
+          "role": "FLOOR",
+          "_classification_reason": "sparse + scattered + upper-half y-mean = secondary aisle",
+          "frame_size": [1920, 1080],
+          "zones": [
+            {"zone_id": "HAIRCARE",    "polygon": [[0,    0], [1920, 0], [1920, 540], [0,    540]]},
+            {"zone_id": "BODYCARE",    "polygon": [[0,  540], [1920, 540], [1920,1080], [0,  1080]]}
+          ]
+        },
+        "CAM_BILLING_01": {
+          "role": "BILLING",
+          "_classification_reason": "25 fps + 71 MB grouped with CAM 5 + zero-detection sampling indicates quiet billing window",
+          "frame_size": [1920, 1080],
+          "zones": [
+            {"zone_id": "BILLING",     "polygon": [[200, 100], [1720, 100], [1720, 1000], [200, 1000]]}
+          ]
+        },
+        "CAM_BILLING_02": {
+          "role": "BILLING",
+          "_classification_reason": "25 fps + tight horizontal cluster of persons = queue at counter",
+          "frame_size": [1920, 1080],
+          "zones": [
+            {"zone_id": "BILLING",     "polygon": [[200, 100], [1720, 100], [1720, 1000], [200, 1000]]}
+          ]
+        }
+      }
+    }
+  }
+}

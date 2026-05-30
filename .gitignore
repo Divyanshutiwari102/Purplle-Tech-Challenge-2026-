@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+
+# data
+data/clips/
+data/events/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights (downloaded on first run)
+*.pt
+*.onnx

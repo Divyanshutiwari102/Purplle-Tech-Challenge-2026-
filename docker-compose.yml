@@ -1,0 +1,54 @@
+# docker-compose.yml
+#
+# `docker compose up` starts:
+#   • api       → FastAPI on http://localhost:8000
+#   • dashboard → Streamlit on http://localhost:8501
+#
+# A named volume `store-data` holds the SQLite database and event JSONLs
+# so they survive container restarts.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: store-intelligence-api:latest
+    container_name: store-intel-api
+    ports:
+      - "8000:8000"
+    environment:
+      STORE_INTEL_DB: /data/store_intel.db
+    volumes:
+      - store-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;r=urllib.request.urlopen('http://localhost:8000/health',timeout=3);sys.exit(0 if r.status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    image: store-intelligence-dashboard:latest
+    container_name: store-intel-dashboard
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    environment:
+      STORE_INTEL_API: http://api:8000
+      STORE_INTEL_DEFAULT_STORE: STORE_BLR_002
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;r=urllib.request.urlopen('http://localhost:8501/_stcore/health',timeout=3);sys.exit(0 if r.status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  store-data:
