@@ -62,6 +62,35 @@ curl -X POST http://localhost:8000/simulation/stop
 
 The dashboard's "▶ Start" buttons trigger the same endpoints from the UI.
 
+## Real CCTV streaming (optional)
+
+The camera panel auto-detects whether real footage + matching detections are
+present and switches between two modes:
+
+| Mode      | What you see                                                                            |
+| --------- | --------------------------------------------------------------------------------------- |
+| **real**  | The actual CCTV mp4 with YOLO bboxes overlaid that follow real people, plus zone polygons + HUD. Detections are pre-computed once via `pipeline/precompute_detections.py` and replayed in sync with the clip. |
+| **synth** | Fallback when clips aren't present (the public repo case). Same UI shape, synthetic actors. |
+
+To switch to real CCTV on your machine:
+
+```bash
+# 1. Drop your clips into data/clips/  (already there in this workspace)
+# 2. Pre-compute YOLO detections once  (~10 min on CPU for 5 clips at stride=5)
+pip install -r requirements.txt          # opencv + ultralytics
+python -m pipeline.precompute_detections \
+       --clips-dir data/clips \
+       --out-dir   data/detections \
+       --stride    5
+
+# 3. Restart the API container so the bind-mounts pick up the new files
+docker compose up -d --force-recreate api
+```
+
+`docker-compose.yml` mounts `data/clips/`, `data/detections/`, and
+`data/layout/store_layout.json` into the API container as **read-only** bind
+mounts. Clips and detections are git-ignored and never pushed.
+
 ## Run the detection pipeline against your own clips
 
 The pipeline is heavier (carries torch + ultralytics + cv2) and is packaged

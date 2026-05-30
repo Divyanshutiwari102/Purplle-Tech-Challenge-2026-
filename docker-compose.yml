@@ -21,6 +21,13 @@ services:
       STORE_INTEL_DB: /data/store_intel.db
     volumes:
       - store-data:/data
+      # Read-only bind mounts so the API can stream real CCTV clips
+      # without baking them into the image (clips are licensed).
+      # Both directories are optional — if missing, the camera stream
+      # falls back to its synthetic renderer.
+      - ./data/clips:/data/clips:ro
+      - ./data/detections:/data/detections:ro
+      - ./data/layout/store_layout.json:/data/store_layout.json:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys;r=urllib.request.urlopen('http://localhost:8000/health',timeout=3);sys.exit(0 if r.status==200 else 1)"]
       interval: 15s

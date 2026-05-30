@@ -14,6 +14,9 @@ env/
 # data
 data/clips/
 data/events/
+# Pre-computed YOLO detection JSONs are derived from the licensed clips
+# and only useful when paired with them — keep them local.
+data/detections/
 # real anonymised retailer data: keeps customer PII (names, phone numbers).
 # Only the derived sample_pos_transactions.csv (no PII) is committed.
 data/pos_transactions/
