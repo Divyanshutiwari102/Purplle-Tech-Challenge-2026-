@@ -361,10 +361,64 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
     role = cfg.get("role", "FLOOR")
     zones = cfg.get("zones") or []
 
-    # Use the recorded fps (clip's actual rate) capped at target_fps for sanity.
     src_fps = float(det.get("fps") or 30.0)
-    period = 1.0 / max(1.0, target_fps)
     stride = int(det.get("stride") or 1)
+
+    # Auto target fps: match the source unless the caller explicitly
+    # asks for slower playback. This is what kills the "0.5x slow"
+    # feel — at stride=5 we still play every frame at 30 fps; the
+    # bbox positions interpolate linearly between detections so the
+    # rectangle slides smoothly instead of jumping every 5 frames.
+    play_fps = target_fps if target_fps > 0 else src_fps
+    period = 1.0 / max(1.0, play_fps)
+
+    # Build a sorted list of detection frame indices for fast lookup.
+    det_indices = sorted(by_frame.keys())
+
+    def _interp_boxes(idx: int) -> list:
+        """Linear interpolation in image coordinates between adjacent
+        detection samples. Tracks only match across the same track_id;
+        a track that disappears in the next sample fades out by
+        keeping its last position."""
+        if not det_indices:
+            return []
+        # Find the bracket [lo, hi] of detection samples around idx.
+        import bisect
+        pos = bisect.bisect_right(det_indices, idx) - 1
+        lo = det_indices[pos] if pos >= 0 else det_indices[0]
+        hi = det_indices[pos + 1] if pos + 1 < len(det_indices) else lo
+        boxes_lo = by_frame.get(lo, [])
+        boxes_hi = by_frame.get(hi, [])
+        if hi == lo or hi - lo <= 0:
+            return boxes_lo
+        if idx <= lo:
+            return boxes_lo
+        if idx >= hi:
+            return boxes_hi
+        t = (idx - lo) / (hi - lo)
+        # Index hi-side boxes by track_id for matching.
+        hi_by_id = {int(b[5]): b for b in boxes_hi}
+        out = []
+        for b in boxes_lo:
+            tid = int(b[5])
+            if tid in hi_by_id:
+                bh = hi_by_id[tid]
+                # Linearly blend bbox + confidence.
+                ix1 = b[0] + (bh[0] - b[0]) * t
+                iy1 = b[1] + (bh[1] - b[1]) * t
+                ix2 = b[2] + (bh[2] - b[2]) * t
+                iy2 = b[3] + (bh[3] - b[3]) * t
+                ic  = b[4] + (bh[4] - b[4]) * t
+                out.append([ix1, iy1, ix2, iy2, ic, tid])
+            else:
+                # Track dropped at the next sample — keep last but
+                # fade confidence so the box visibly dims out.
+                out.append([b[0], b[1], b[2], b[3], b[4] * (1 - t), tid])
+        # Tracks that newly appeared in `hi`: fade them in.
+        for tid, bh in hi_by_id.items():
+            if not any(int(b[5]) == tid for b in boxes_lo):
+                out.append([bh[0], bh[1], bh[2], bh[3], bh[4] * t, tid])
+        return out
 
     cap = cv2.VideoCapture(str(clip_path))
     if not cap.isOpened():
@@ -372,28 +426,17 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
 
     emitted = 0
     frame_idx = 0
-    last_box_idx = -1
-    last_boxes: list = []
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
-                # Loop the clip.
+                # Loop the clip seamlessly.
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 frame_idx = 0
                 continue
 
-            # Detections were sampled every `stride` frames. Carry the
-            # last seen boxes forward so the box "follows" the person
-            # smoothly across non-detected frames.
-            if frame_idx in by_frame:
-                last_boxes = by_frame[frame_idx]
-                last_box_idx = frame_idx
-            elif frame_idx - last_box_idx > stride * 6:
-                # Detections are stale; clear them.
-                last_boxes = []
-
-            jpg = _render_real(frame, frame_idx, last_boxes, target_fps,
+            boxes = _interp_boxes(frame_idx)
+            jpg = _render_real(frame, frame_idx, boxes, play_fps,
                                cam_id, role, zones)
             yield _wrap_jpeg(jpg)
             emitted += 1
@@ -476,7 +519,7 @@ def list_cameras() -> dict:
 
 
 @router.get("/cameras/stream/{cam_id}")
-def camera_stream(cam_id: str, request: Request, fps: float = 8.0,
+def camera_stream(cam_id: str, request: Request, fps: float = 0.0,
                   max_frames: Optional[int] = None,
                   mode: Optional[str] = None) -> StreamingResponse:
     """
@@ -484,6 +527,9 @@ def camera_stream(cam_id: str, request: Request, fps: float = 8.0,
       mode=real   → require clip + detections, else 503
       mode=sim    → force the synthetic renderer
       omitted     → auto: real if both files exist, else sim
+
+    fps=0 (default) plays at the clip's native fps. fps>0 caps it
+    (use a smaller number for slow-motion analysis on a weak machine).
     """
     clip = _find_clip_for(cam_id)
     det = _find_detections_for(cam_id)
@@ -500,7 +546,10 @@ def camera_stream(cam_id: str, request: Request, fps: float = 8.0,
                    f"clip={bool(clip)}, detections={bool(det)}",
         )
     else:
-        gen = _stream_synth(cam_id, target_fps=fps, max_frames=max_frames)
+        # Synthetic mode keeps a sensible default if the caller did
+        # not specify a target rate.
+        gen = _stream_synth(cam_id, target_fps=(fps if fps > 0 else 12.0),
+                            max_frames=max_frames)
 
     return StreamingResponse(
         gen,

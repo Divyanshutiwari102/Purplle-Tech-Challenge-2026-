@@ -22,7 +22,12 @@ from typing import Iterator
 OperationalError = sqlite3.OperationalError
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-_DEFAULT_DB = os.environ.get("STORE_INTEL_DB", "/data/store_intel.db")
+
+
+def _default_db() -> str:
+    """Read the env var lazily so test monkeypatches work across threads."""
+    return os.environ.get("STORE_INTEL_DB", "/data/store_intel.db")
+
 
 # A single connection per thread. SQLite connections are not thread-safe
 # by default; using a thread-local keeps things correct without paying
@@ -46,7 +51,7 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def get_connection(db_path: str | None = None) -> sqlite3.Connection:
-    db_path = db_path or _DEFAULT_DB
+    db_path = db_path or _default_db()
     conn = getattr(_local, "conn", None)
     if conn is None or getattr(_local, "path", None) != db_path:
         conn = _connect(db_path)

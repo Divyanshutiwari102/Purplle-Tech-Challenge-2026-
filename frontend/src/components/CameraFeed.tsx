@@ -21,7 +21,8 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
   const [active, setActive] = useState(list[0] ?? "CAM_1");
   const [info, setInfo] = useState<CameraInfo | null>(null);
   const [bumpKey, setBumpKey] = useState(0); // forces <img> re-fetch on speed change
-  const [fps, setFps] = useState(8);
+  // speed multiplier of the clip's native fps. 0 = native (1×).
+  const [speed, setSpeed] = useState(1);
 
   useEffect(() => {
     let alive = true;
@@ -33,7 +34,11 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
 
   const mode = info?.modes?.[active]?.mode ?? "sim";
   const clip = info?.modes?.[active]?.clip;
+  const nativeFps = info?.modes?.[active]?.fps ?? 30;
   const meta = ROLE_BY_CAM[active] ?? { label: active, role: "FLOOR", overlays: [] };
+
+  // 0 sentinel means "let the server pick native fps", else cap it.
+  const fpsParam = speed === 1 ? 0 : nativeFps * speed;
 
   return (
     <div className="bg-panel rounded-xl border border-line p-4">
@@ -50,17 +55,22 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-500">Speed</span>
-          {[2, 4, 8, 15].map((s) => (
+          {[
+            { v: 0.5, label: "0.5×" },
+            { v: 1,   label: "1×"   },
+            { v: 2,   label: "2×"   },
+            { v: 3,   label: "3×"   },
+          ].map(({ v, label }) => (
             <button
-              key={s}
-              onClick={() => { setFps(s); setBumpKey((k) => k + 1); }}
+              key={v}
+              onClick={() => { setSpeed(v); setBumpKey((k) => k + 1); }}
               className={`px-2 py-1 rounded text-xs border ${
-                fps === s
+                speed === v
                   ? "bg-accent text-black border-accent"
                   : "bg-panel2 text-zinc-300 border-line hover:border-accent/50"
               }`}
             >
-              {s} fps
+              {label}
             </button>
           ))}
         </div>
@@ -82,7 +92,7 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
           </div>
           <img
             key={`${active}-${bumpKey}`}
-            src={`${cameraSrc(active)}?fps=${fps}`}
+            src={`${cameraSrc(active)}?fps=${fpsParam}`}
             alt={`${active} ${meta.label}`}
             className="w-full h-full object-contain"
           />
@@ -103,15 +113,14 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
             <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-1">Telemetry</div>
             <div className="grid grid-cols-2 gap-2">
               <KPI label="Mode"  value={mode === "real" ? "REAL" : "SIM"} tone={mode === "real" ? "ok" : "warn"} />
-              <KPI label="FPS"   value={String(fps)} tone="info" />
+              <KPI label="Speed" value={speed === 1 ? "1×" : `${speed}×`} tone="info" />
               <KPI label="Source" value={mode === "real" ? "MP4" : "Drawn"} tone="info" />
               <KPI label="Frames" value={info?.modes?.[active]?.n_detected_frames?.toString() ?? "—"} tone="info" />
             </div>
-            {clip && (
-              <div className="mt-1 text-[11px] text-zinc-500 truncate">
-                clip: <code>{clip}</code>
-              </div>
-            )}
+            <div className="mt-1 text-[11px] text-zinc-500 truncate">
+              native: <code>{nativeFps.toFixed(1)} fps</code>
+              {clip && <> • clip: <code>{clip}</code></>}
+            </div>
           </div>
 
           <div>
