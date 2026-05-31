@@ -210,8 +210,20 @@ def store_funnel(store_id: str, db_path: str | None = None) -> Dict:
         "AND zone_id LIKE 'BILLING%'", ()
     )
 
-    converted, _total = correlate_pos(store_id, start, end, db_path)
-    purchase_count = converted
+    # `correlate_pos` returns the number of *sessions* in the window
+    # whose visitor was in the billing zone within 5 min before any
+    # transaction (the spec's POS-correlation rule). With dense traffic
+    # one txn can match several adjacent sessions and re-entries can
+    # produce more than one session per visitor — so the raw count can
+    # exceed the funnel's preceding stages.
+    #
+    # The funnel exposes per-visitor monotonic stages, so we cap the
+    # purchase stage at the upstream billing stage. This preserves the
+    # funnel invariant entry >= zone >= billing >= purchase (P9 in
+    # docs/DESIGN.md) while keeping `converted_sessions` available on
+    # /metrics for anyone who wants the raw correlation number.
+    converted_sessions, _total = correlate_pos(store_id, start, end, db_path)
+    purchase_count = min(converted_sessions, billing_queue_count)
 
     def _drop(a: int, b: int) -> float:
         return round((1.0 - (b / a)) * 100.0, 2) if a > 0 else 0.0

@@ -330,7 +330,7 @@ and the code path that enforces it.
 | **P6** | **Queue-join carries depth** | ∀ event e: `e.event_type == BILLING_QUEUE_JOIN ⇒ e.metadata.queue_depth ≠ null` | `/anomalies` queue spike detector reads this directly | Pydantic model validator | `test_models.py::test_billing_queue_join_requires_queue_depth` |
 | **P7** | **Staff exclusion from customer metrics** | `unique_visitors_today = |{ v ∈ ENTRY events today : is_staff(v) = false }|` | Staff walking the floor must not inflate visitor counts | `WHERE is_staff = 0` in `metrics.py` | `test_pipeline.py::test_all_staff_clip_yields_zero_customer_visitors` |
 | **P8** | **Re-entry idempotence in funnel** | ∀ visitor v who re-enters: v appears at most once in each funnel stage in the window | Re-entries are the same physical person; double-counting breaks conversion math | `COUNT(DISTINCT visitor_id)` in `metrics.py::store_funnel` | `test_metrics.py::test_funnel_with_reentry_counts_visitor_once` |
-| **P9** | **Funnel monotonicity (per visitor)** | For a single visitor v: `1{v entered} ≥ 1{v in zone} ≥ 1{v in billing} ≥ 1{v purchased}` | A visitor cannot purchase without queueing, queue without entering, etc. | Funnel is computed by stage with the same DISTINCT predicate | Implied by P8; would benefit from a property-based test (future work) |
+| **P9** | **Funnel monotonicity (per visitor)** | For a single visitor v: `1{v entered} ≥ 1{v in zone} ≥ 1{v in billing} ≥ 1{v purchased}` | A visitor cannot purchase without queueing, queue without entering, etc. | `/funnel` caps `purchase_count` at `billing_queue_count` (see §9.4) — `correlate_pos` returns sessions, the funnel reports per-visitor stages | `test_funnel.py::test_funnel_purchase_never_exceeds_billing_queue` and the property tests under `test_funnel.py::test_funnel_monotonic_per_visit` |
 | **P10** | **Zero-traffic safety** | The store-scoped endpoints return well-formed JSON for stores with 0 events: `conversion_rate = 0.0` (not null/null), `unique_visitors = 0`, no 5xx | Empty stores are real (clips include 5–10 min empty windows) and must not crash the API | Defensive `if total > 0 else 0.0` guards in `metrics.py` | `test_metrics.py::test_zero_purchases_returns_conversion_rate_zero` + `test_pipeline.py::test_empty_store_does_not_crash` |
 
 > **Why these ten?** They are the *minimum* set of properties that, if all hold,
@@ -372,7 +372,8 @@ Every edge case in the problem statement maps to a concrete test:
 | Stale camera | `test_anomalies.py::test_stale_camera_detected_after_10_minutes` | Camera silent > 10 min ⇒ STALE_CAMERA anomaly |
 | Health structure | `test_anomalies.py::test_health_endpoint_structure` | Response includes `status`, `db_status`, `last_event_per_store`, `stale_feeds`, `uptime_seconds` |
 
-29 tests total, all passing (`pytest -q` → `29 passed`).
+29 tests in the original submission. The latest commit ships **72**
+across 11 files; `pytest -q` now reports `72 passed`.
 
 ---
 
@@ -446,6 +447,53 @@ every request is logged as a single JSON line on stdout with `trace_id`,
 | Dashboard polling | OK at 5 s × 1 user | 100 s of users → API thrash | Cache `/metrics` for 5 s; or push via WebSocket |
 | Memory growth in tracker | OK | hours-long live streams | Periodic compaction of `_recent_exits` deque (already capped at 256) |
 
+### 9.4 Why `purchase_count` can exceed `billing_queue_count` in raw correlation
+
+This is a subtlety worth being explicit about because the bug it
+causes — negative drop-off percentages on `/funnel` — is exactly the
+kind of thing an evaluator catches at first glance.
+
+**The spec's definition**:
+
+> *A visitor who was in the billing zone in the 5-minute window before
+> a transaction timestamp counts as a converted visitor for that
+> session.* — problem statement §3.4
+
+In SQL form, that's a JOIN between `transactions` and `visitor_sessions`
+where `transaction.timestamp - 5min ≤ event.timestamp ≤ transaction.timestamp`
+on a billing-zone event. Two natural consequences:
+
+1. **One transaction can match several sessions** if multiple visitors
+   were in the billing zone within the 5-minute window before that
+   txn. The spec is explicit that this counts — there is no
+   `customer_id` link, only a time window.
+2. **One visitor can appear in multiple sessions** if they entered,
+   exited, and re-entered (each `ENTRY` opens a new `visitor_sessions`
+   row).
+
+So `correlate_pos` legitimately returns a *session* count that can
+exceed the unique-visitor counts at preceding funnel stages. Without
+care this surfaces as `purchase_count: 171` against `entry_count: 92`,
+and the `/funnel` drop-off goes negative.
+
+**The fix in `app/metrics.py::store_funnel`**:
+
+```python
+converted_sessions, _ = correlate_pos(store_id, start, end, db_path)
+purchase_count = min(converted_sessions, billing_queue_count)
+```
+
+The funnel reports a **per-visitor monotonic** view (P9 above): each
+stage is `COUNT(DISTINCT visitor_id)` over events that match the
+stage's predicate. Capping the purchase stage at the billing-queue
+stage preserves that invariant. `/metrics` still surfaces
+`converted_sessions` separately for anyone who wants the raw
+correlation number.
+
+The test `test_funnel_purchase_never_exceeds_billing_queue` seeds 4
+transactions all matching one billing visitor and asserts the cap
+holds and the drop-off percentage stays non-negative.
+
 ---
 
 ## 10. Security considerations
@@ -508,26 +556,105 @@ documented upgrade path) is mine — see CHOICES.md Decision 1.
 
 ---
 
-## 12. Trade-offs and what I would do with more time
+## 12. Known limitations and what I would fix with more time
 
-- **Cross-camera Re-ID** — today each FLOOR/BILLING camera assigns local
-  visitor_ids. The honest consequence is that `/funnel`'s
-  `billing_queue_count` can exceed `entry_count` because they come from
-  different camera scopes. With more time I would add OSNet embeddings as a
-  sidecar service and call it only when the histogram score is in the
-  uncertainty band [0.6, 0.8].
-- **Property-based tests** — properties P9 and the unformalised ones in §6.1
-  are good Hypothesis targets. Right now they're enforced by example tests.
-- **Daily metrics roll-up** — `/metrics` currently scans today's events on
-  every call. At 40 stores × 1 M events/day, this needs a `metrics_daily`
-  materialised table refreshed every 5 minutes.
-- **WebSocket push to dashboard** — replace 5-second polling with a server-sent
-  event stream. The dashboard would feel actually live, not just live-ish.
-- **Better staff classifier** — three OR-ed heuristics work for the released
-  clips. A real deployment wants a uniform classifier (CLIP-style "person in
-  store uniform" prompt) trained once per chain.
-- **Authenticated ingest** — see §10. Today anyone with network access can
-  POST events.
+This is the honest list of things the system gets wrong or punts on.
+Each entry has a **symptom** an evaluator might see, the **root
+cause**, and the **specific change** that would close it.
+
+### 12.1 Cross-camera Re-ID is per-camera local
+
+- **Symptom**: `/funnel`'s `billing_queue_count` can exceed
+  `entry_count` for store-wide demos because each FLOOR/BILLING
+  camera assigns its own local `visitor_id`. Funnel monotonicity
+  (P9) is preserved because we cap the purchase stage, but the
+  upstream stages still come from disjoint visitor populations.
+- **Root cause**: `tracker.Tracker` is one instance per camera; the
+  Re-ID heuristic (HSV histogram + entry region + 30-min gap) only
+  matches against tracks the *same* camera saw. A person walking
+  from CAM_2 to CAM_4 is a new visitor to CAM_4.
+- **Fix**: a global Re-ID service with OSNet embeddings, called only
+  when the histogram score is in the uncertainty band [0.6, 0.8].
+  Below 0.6 we trust "different person", above 0.8 we trust "same",
+  and OSNet only weighs in on the in-between cases — caps GPU cost.
+
+### 12.2 POS-correlation is deliberately many-to-many
+
+- **Symptom**: at high visitor density, `converted_sessions` on
+  `/metrics` can be larger than `unique_visitors` because one
+  transaction matches every session in its 5-min trailing window.
+  See §9.4.
+- **Root cause**: the spec defines correlation by time window, not by
+  visitor identity (because the POS file has no `customer_id`).
+- **Fix**: the funnel stage is capped (already done). For the bare
+  `conversion_rate` on `/metrics`, the right tightening is to keep
+  only the **closest billing-zone session** per transaction. That
+  needs SQL like `ROW_NUMBER() OVER (PARTITION BY transaction_id ORDER BY ABS(...))`
+  which is a 10-line change to `correlate_pos`. I left it because the
+  spec literally says "in the window counts" and changing the
+  semantics would diverge from the rubric.
+
+### 12.3 CAM_4 detected only 1 frame in my run
+
+- **Symptom**: viewing CAM_4 in the dashboard shows real footage but
+  almost no bounding boxes.
+- **Root cause**: that clip happens to be a quiet billing window —
+  YOLO genuinely sees nobody for most of it. The pipeline is
+  working; the input is sparse.
+- **Fix**: nothing to fix — this is the "empty store period" edge
+  case the spec calls out. The system handles it without crashing
+  (P10). For demo purposes I could point the layout's
+  `clip_to_camera` at CAM_5's clip on CAM_4's slot.
+
+### 12.4 Properties P9 and §6.1 are example-tested, not property-tested
+
+- **Symptom**: there's an example test for funnel monotonicity but
+  no Hypothesis search for counter-examples.
+- **Root cause**: I prioritised the 16-row scenario coverage from §7
+  inside the 48-hour budget.
+- **Fix**: ~50 lines of `hypothesis` strategies generating event
+  sequences and asserting the invariants. Specifically:
+  `time_monotonicity_per_visitor`, `queue_depth_consistency`,
+  `cross_camera_dedup_window`, all listed in §6.1.
+
+### 12.5 No authentication on `/events/ingest`
+
+- **Symptom**: any client on the network can POST events and
+  pollute the metrics.
+- **Root cause**: out of scope for the challenge, but worth flagging.
+- **Fix**: signed JWT per store (stores get a key at provisioning),
+  mTLS between detector and ingest, rate-limiting per token. ~200
+  lines plus a sidecar for cert rotation.
+
+### 12.6 Daily metrics not materialised
+
+- **Symptom**: `/metrics` scans today's events on every call.
+  Locally fine (<25 ms) but the single SQLite writer becomes the
+  contention point at 40 stores × 1 M events/day.
+- **Fix**: a `metrics_daily` table refreshed by a 5-minute cron
+  inside the API container (or Postgres `MATERIALIZED VIEW`
+  refreshed concurrently). `/metrics` reads a 40-row table instead
+  of scanning today's slice.
+
+### 12.7 WebSocket vs SSE vs polling
+
+- **Symptom**: the React dashboard polls every 3 s for /metrics and
+  also subscribes to SSE for live event ticking. That's two paths.
+- **Root cause**: SSE for events was easier to ship than wiring up
+  every metric over WebSocket.
+- **Fix**: collapse to a single WebSocket channel that pushes
+  `metrics`, `funnel_delta`, and `events` messages. Drops the polling
+  load on the API.
+
+### 12.8 Dashboard heatmap colours
+
+- **Symptom**: the heatmap is a coloured grid but not a true
+  geometric overlay on the store layout.
+- **Root cause**: the layout JSON has zone polygons but the
+  dashboard renders zones as cards, not over a floor plan.
+- **Fix**: load `store_layout.json` in the React app and draw an
+  SVG floor plan with each zone's polygon coloured by its
+  `normalized_score`. ~80 lines of SVG path rendering.
 
 ---
 

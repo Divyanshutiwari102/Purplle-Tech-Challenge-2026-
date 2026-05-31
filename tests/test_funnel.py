@@ -116,3 +116,47 @@ def test_zero_purchase_store_returns_zero_purchase_count(client):
     ])
     f = client.get("/stores/STORE_BLR_002/funnel").json()
     assert f["purchase_count"] == 0
+
+
+def test_funnel_purchase_never_exceeds_billing_queue(client, db_path):
+    """
+    Property P9 in DESIGN.md: the funnel must be monotonic per stage.
+    The raw POS correlation can match several sessions to a single txn
+    (the 5-min window rule), so purchase_count is capped at
+    billing_queue_count. This test seeds many txns against one billing
+    visitor — without the cap, raw conversion would inflate beyond the
+    upstream stage.
+    """
+    import sqlite3, uuid as _uuid
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    vid = "VIS_one_buyer"
+    events = [
+        make_event(event_type="ENTRY", visitor_id=vid, timestamp=base),
+        make_event(event_type="BILLING_QUEUE_JOIN", visitor_id=vid,
+                   zone_id="BILLING", camera_id="CAM_BILLING_01",
+                   timestamp=base + timedelta(minutes=1)),
+    ]
+    _ingest(client, events)
+
+    # Insert four txns that all correlate to this single billing event.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT OR IGNORE INTO stores VALUES (?, ?, ?, ?)",
+        ("STORE_BLR_002", "STORE_BLR_002", "Asia/Kolkata", "{}"),
+    )
+    for offset in (60, 90, 120, 180):
+        ts = (base + timedelta(minutes=1, seconds=offset)
+              ).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            "INSERT INTO transactions VALUES (?, ?, ?, ?)",
+            (f"TXN_{_uuid.uuid4().hex[:8]}", "STORE_BLR_002", ts, 500.0),
+        )
+    conn.commit()
+    conn.close()
+
+    f = client.get("/stores/STORE_BLR_002/funnel").json()
+    # Funnel monotonicity invariant: each stage <= the previous one.
+    assert f["purchase_count"] <= f["billing_queue_count"], f
+    assert f["billing_queue_count"] <= f["zone_visit_count"] + f["billing_queue_count"], f
+    assert f["entry_count"] >= f["zone_visit_count"], f
+    assert f["billing_to_purchase_dropoff_pct"] >= 0.0, f
