@@ -25,8 +25,21 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def _default_db() -> str:
-    """Read the env var lazily so test monkeypatches work across threads."""
-    return os.environ.get("STORE_INTEL_DB", "/data/store_intel.db")
+    """
+    Read the env var lazily so test monkeypatches work across threads.
+
+    Resolution order:
+      1. STORE_INTEL_DB (explicit override) — always wins.
+      2. /tmp/store_intel.db when running on Railway (their filesystem
+         outside /tmp is read-only). Detected via RAILWAY_ENVIRONMENT.
+      3. /data/store_intel.db — the docker-compose default.
+    """
+    explicit = os.environ.get("STORE_INTEL_DB")
+    if explicit:
+        return explicit
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        return "/tmp/store_intel.db"
+    return "/data/store_intel.db"
 
 
 # A single connection per thread. SQLite connections are not thread-safe

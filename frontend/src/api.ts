@@ -1,6 +1,14 @@
 // Tiny API client. The dev server proxies `/api/*` to the FastAPI
 // backend; in production the frontend container's nginx does the same.
-const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
+//
+// API base resolution order:
+//   1. VITE_API_URL — set by Vercel for production (points at Railway).
+//   2. VITE_API_BASE — kept for backward compatibility.
+//   3. "/api" — local dev / docker-compose, proxied by nginx.
+const BASE =
+  (import.meta.env.VITE_API_URL as string | undefined) ??
+  (import.meta.env.VITE_API_BASE as string | undefined) ??
+  "/api";
 
 export async function jget<T = any>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`);

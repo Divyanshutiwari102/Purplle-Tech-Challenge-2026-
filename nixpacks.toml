@@ -1,0 +1,30 @@
+# Nixpacks build plan for Railway.
+#
+# Phases:
+#   setup    — install Python 3.11 from nixpkgs.
+#   install  — pip install the slim API dependency set
+#              (no torch, no ultralytics — those live in
+#              Dockerfile.pipeline, not in the API container).
+#   build    — nothing extra; the app is pure Python.
+#   start    — what runs as the container's PID 1.
+
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = [
+    "python -m venv /opt/venv",
+    "/opt/venv/bin/pip install --upgrade pip",
+    "/opt/venv/bin/pip install -r requirements-api.txt",
+]
+
+[phases.build]
+cmds = []
+
+[start]
+cmd = "/opt/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+
+[variables]
+# So app/db.py reads `RAILWAY_ENVIRONMENT` and routes the SQLite file
+# to /tmp instead of /data — Railway's writable scratch space.
+PYTHONUNBUFFERED = "1"
