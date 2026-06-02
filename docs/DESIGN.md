@@ -656,6 +656,38 @@ cause**, and the **specific change** that would close it.
   SVG floor plan with each zone's polygon coloured by its
   `normalized_score`. ~80 lines of SVG path rendering.
 
+### 12.9 v2 POS sample CSV reuses `order_id` as a line-item key
+
+- **Symptom**: the cleaned CSV Purplle re-released on 02-Jun-2026
+  (`data/new_data/POS - sample transactions.csv`) has 101 rows
+  with `order_id` running `1, 2, 3, …, 101`. The original Brigade
+  raw CSV from the Resource Center had 24 rows with `order_id`
+  repeated across line items belonging to the same cart
+  (e.g. `104363838` on every line of one customer's purchase).
+  Both files describe the **same 24 carts and the same
+  ₹34,331.71 in revenue** — the v2 file is just normalised to a
+  per-line-item shape.
+- **Root cause**: schema changed but the column name didn't.
+  Naive grouping by `order_id` would inflate 24 carts to 101
+  fake "transactions" and quadruple the conversion-rate
+  denominator.
+- **Fix in `app/pos_loader.py::_read_lineitem_csv`**: detect the
+  shape with one heuristic — if `len(rows) >= 1.5 × unique(order_id)`
+  the field is reused per cart (Brigade raw), otherwise it's
+  per line item (v2 sample). When per line item, group by
+  `(store_id, order_date, order_time)` and mint a
+  deterministic `TXN_<sha1[:10]>` cart id from the time key.
+  Tested both branches in `tests/test_pos_loader.py`
+  (`test_loader_reads_brigade_format` for shape 2,
+  `test_loader_groups_v2_lineitem_csv_by_time` and
+  `test_loader_handles_real_v2_sample_file` for shape 3).
+- **What I would prefer with more spec authority**: ask Purplle
+  to add a separate `cart_id` column so the schema is
+  unambiguous. The heuristic is robust on these two files
+  (1.5× boundary cleanly separates them) but a customer with
+  exactly 1.5 line items per cart on average sits on the
+  decision boundary.
+
 ---
 
 ## 13. Acceptance gate self-check

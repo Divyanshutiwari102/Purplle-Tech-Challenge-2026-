@@ -21,6 +21,11 @@ data/detections/
 # Only the derived sample_pos_transactions.csv (no PII) is committed.
 data/pos_transactions/
 data/layout/*.xlsx
+# v2 raw uploads from the Purplle Resource Center (02-Jun-2026): the inner
+# `data/new data/Store 1` and `Store 2` directories ship licensed CCTV mp4s
+# that must never be pushed. The cleaned v2 sample CSV lives separately
+# under data/new_data/ (underscore) and IS committed.
+data/new data/
 *.db
 *.db-wal
 *.db-shm

@@ -20,6 +20,16 @@ open http://localhost:3030     # React dashboard (use `start` on Windows)
 | **API Docs (Swagger)** | http://localhost:8000/docs            | Interactive endpoint explorer                        |
 | **Streamlit (legacy)** | http://localhost:8501                 | Fallback UI, kept for parity                         |
 
+## Submission
+
+Reviewer contact: `purplletechchallenge2026@hackerearth.com` (per the
+final v2 problem statement and Resource Center, dated 02-Jun-2026).
+
+The repo tracks the v2 spec: revised submission deadline, the cleaned
+7-column POS CSV in `data/new_data/POS - sample transactions.csv`
+(101 line items spanning 24 carts), and the same Brigade Bangalore
+ground truth (₹34,331.71 across 24 transactions on 10-Apr-2026).
+
 ## Real store IDs
 
 The repo ships with two store ids the evaluator can drive against:
@@ -163,7 +173,7 @@ pip install -r requirements.txt
 pytest -q --tb=short
 ```
 
-Currently **66+ tests** spread across 8 files. Each file's first lines are a
+Currently **74 tests** spread across the `tests/` tree. Each file's first lines are a
 `# PROMPT:` block (the AI prompt that bootstrapped it) and a `# CHANGES MADE:`
 block (what was edited afterwards and why).
 
@@ -181,7 +191,7 @@ store-intelligence/
 │   ├── dashboard.py       /stores/{id}/stream (SSE)
 │   ├── camera_stream.py   /cameras + /cameras/stream/{cam_id} (MJPEG)
 │   ├── simulation.py      /simulation/* control plane
-│   ├── pos_loader.py      CSV loader (simple + Brigade format)
+│   ├── pos_loader.py      CSV loader (simple + line-item, auto-detected)
 │   ├── logging_mw.py      structured-log middleware
 │   ├── db.py              sqlite3 helpers (WAL)
 │   └── schema.sql         tables, indexes, CHECK constraints
