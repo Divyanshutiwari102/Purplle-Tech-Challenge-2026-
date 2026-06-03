@@ -61,6 +61,60 @@
           ]
         }
       }
+    },
+
+    "ST1008": {
+      "name": "Brigade Bangalore (Store 2)",
+      "timezone": "Asia/Kolkata",
+      "_clips_subdir": "store2",
+      "_detections_subdir": "store2",
+      "open_hours": {
+        "mon": ["10:00", "21:00"], "tue": ["10:00", "21:00"],
+        "wed": ["10:00", "21:00"], "thu": ["10:00", "21:00"],
+        "fri": ["10:00", "22:00"], "sat": ["10:00", "22:00"],
+        "sun": ["11:00", "21:00"]
+      },
+      "clip_to_camera": {
+        "entry 1.mp4":      "ENTRY_1",
+        "entry 2.mp4":      "ENTRY_2",
+        "zone.mp4":         "ZONE",
+        "billing_area.mp4": "BILLING_AREA"
+      },
+      "cameras": {
+        "ENTRY_1": {
+          "role": "ENTRY",
+          "_classification_reason": "v2 sample, store 2: door-width clip labelled 'entry 1'",
+          "frame_size": [1920, 1080],
+          "entry_line_y": 540,
+          "zones": []
+        },
+        "ENTRY_2": {
+          "role": "ENTRY",
+          "_classification_reason": "v2 sample, store 2: second entry corridor",
+          "frame_size": [1920, 1080],
+          "entry_line_y": 540,
+          "zones": []
+        },
+        "ZONE": {
+          "role": "FLOOR",
+          "_classification_reason": "v2 sample, store 2: main shopping floor",
+          "frame_size": [1920, 1080],
+          "zones": [
+            {"zone_id": "SKINCARE",    "polygon": [[0,    0], [960,  0], [960,  540], [0,    540]]},
+            {"zone_id": "FRAGRANCE",   "polygon": [[960,  0], [1920, 0], [1920, 540], [960,  540]]},
+            {"zone_id": "MAKEUP",      "polygon": [[0,  540], [960, 540], [960, 1080], [0,  1080]]},
+            {"zone_id": "HAIRCARE",    "polygon": [[960,540], [1920,540], [1920,1080], [960,1080]]}
+          ]
+        },
+        "BILLING_AREA": {
+          "role": "BILLING",
+          "_classification_reason": "v2 sample, store 2: explicit billing_area.mp4 label",
+          "frame_size": [960, 1080],
+          "zones": [
+            {"zone_id": "BILLING",     "polygon": [[60, 100], [900, 100], [900, 1000], [60, 1000]]}
+          ]
+        }
+      }
     }
   }
 }

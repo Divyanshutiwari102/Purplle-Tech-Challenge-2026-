@@ -27,5 +27,10 @@ export async function jpost<T = any>(path: string, body?: unknown): Promise<T> {
 }
 
 export const apiBase = BASE;
-export const cameraSrc = (camId: string) => `${BASE}/cameras/stream/${camId}`;
+// Camera streams are scoped per store so the same `CAM_1` slug can
+// resolve to different clips for STORE_BLR_002 vs ST1008.
+export const cameraSrc = (camId: string, storeId?: string) =>
+  storeId
+    ? `${BASE}/cameras/stream/${camId}?store_id=${encodeURIComponent(storeId)}`
+    : `${BASE}/cameras/stream/${camId}`;
 export const sseUrl = (storeId: string) => `${BASE}/stores/${storeId}/stream`;

@@ -49,7 +49,7 @@ export function useDashboard(storeId: string) {
           jget<Heatmap>(`/stores/${storeId}/heatmap`),
           jget<Anomalies>(`/stores/${storeId}/anomalies`),
           jget<Health>(`/health`),
-          jget<{ cameras: string[] }>(`/cameras`),
+          jget<{ cameras: string[] }>(`/cameras?store_id=${encodeURIComponent(storeId)}`),
         ]);
         if (!alive) return;
         setMetrics(m);

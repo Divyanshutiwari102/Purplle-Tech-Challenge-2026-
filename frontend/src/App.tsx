@@ -126,7 +126,7 @@ const App: React.FC = () => {
       {/* main grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
-          <CameraFeed cameras={dash.cameras} />
+          <CameraFeed cameras={dash.cameras} storeId={storeId} />
           <div className="bg-panel rounded-xl border border-line p-4">
             <h2 className="text-sm font-medium mb-3">Conversion funnel</h2>
             <FunnelChart data={dash.funnel} />

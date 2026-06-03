@@ -3,20 +3,24 @@ Camera stream — real CCTV frames with YOLO bboxes that follow the
 actual people in the clip.
 
 Two modes, picked at request time:
-  • REAL    — when both `data/clips/<...>.mp4` and the matching
-              pre-computed `data/detections/<CAM_X>.json` are present.
-              Decodes mp4, overlays bboxes / track ids / zone polygons
-              and a HUD, and serves as MJPEG.
+  • REAL    — when both the clip mp4 and the matching pre-computed
+              detection JSON are present. Decodes mp4, overlays
+              bboxes / track ids / zone polygons and a HUD, and
+              serves as MJPEG.
   • SYNTH   — fallback for evaluators who clone the public repo
               without our challenge-licensed clips. Same UI shape, but
               the boxes are synthetic actors moving over a generated
               floor grid.
 
-Why pre-computed detections?
-  Real-time YOLO at 1080p on CPU is ~80–120 ms/frame, which would
-  saturate the API. We run YOLO once via `pipeline.precompute_detections`
-  and replay the bboxes alongside the video at real time. The bbox
-  positions are still YOLO outputs — nothing is faked.
+Multi-store support
+  The layout JSON now declares one entry per `store_id` under
+  `stores`. For each store we resolve:
+    • clip directory   : `data/clips/<_clips_subdir>` if set, else `data/clips`
+    • detections dir   : `data/detections/<_detections_subdir>` if set,
+                         else `data/detections`
+  All store-scoped helpers below take an optional `store_id`; calls
+  without one default to the first store declared in the layout
+  (preserves the v1 single-store behaviour).
 """
 from __future__ import annotations
 
@@ -44,29 +48,72 @@ _LAYOUT_CANDIDATES = [
 ]
 
 
-def _load_layout() -> Dict[str, dict]:
+def _load_layout_full() -> dict:
+    """Whole layout doc (or {} on failure)."""
     for p in _LAYOUT_CANDIDATES:
         if os.path.exists(p):
             try:
                 with open(p, "r", encoding="utf-8") as f:
-                    layout = json.load(f)
-                stores = layout.get("stores") or {}
-                if stores:
-                    first = next(iter(stores.values()))
-                    return first.get("cameras") or {}
+                    return json.load(f) or {}
             except Exception:
                 pass
     return {}
 
 
-# CAM_N (used in detections / UI) → the canonical camera id from the layout.
-_SHORT_TO_LAYOUT = {
+def _list_store_ids() -> List[str]:
+    full = _load_layout_full()
+    return list((full.get("stores") or {}).keys())
+
+
+def _default_store_id() -> str:
+    ids = _list_store_ids()
+    return ids[0] if ids else "STORE_BLR_002"
+
+
+def _resolve_store_id(store_id: Optional[str]) -> str:
+    if store_id and store_id in _list_store_ids():
+        return store_id
+    return _default_store_id()
+
+
+def _store_block(store_id: str) -> dict:
+    full = _load_layout_full()
+    return ((full.get("stores") or {}).get(store_id)) or {}
+
+
+def _load_layout(store_id: Optional[str] = None) -> Dict[str, dict]:
+    """Cameras dict for a given store. Empty dict if missing."""
+    sid = _resolve_store_id(store_id)
+    return (_store_block(sid).get("cameras") or {})
+
+
+# Per-store mapping from "user-friendly id used in URLs" → "layout
+# camera id". For STORE_BLR_002 we keep CAM_1..5 as the public ids
+# (the React UI ships with those). For other stores we expose the
+# layout ids verbatim so a store with native ids like ENTRY_1 doesn't
+# get squashed into CAM_X.
+_BLR_002_SHORT_TO_LAYOUT = {
     "CAM_1": "CAM_ENTRY_01",
     "CAM_2": "CAM_FLOOR_01",
     "CAM_3": "CAM_FLOOR_02",
     "CAM_4": "CAM_BILLING_01",
     "CAM_5": "CAM_BILLING_02",
 }
+
+
+def _short_to_layout(store_id: str) -> Dict[str, str]:
+    if store_id == "STORE_BLR_002":
+        return dict(_BLR_002_SHORT_TO_LAYOUT)
+    # Other stores: identity mapping over whatever the layout declares.
+    return {cid: cid for cid in _load_layout(store_id).keys()}
+
+
+def _public_camera_ids(store_id: str) -> List[str]:
+    """Camera ids the API exposes for this store, in declaration order."""
+    if store_id == "STORE_BLR_002":
+        return list(_BLR_002_SHORT_TO_LAYOUT.keys())
+    return list(_load_layout(store_id).keys())
+
 
 _DEFAULT_W, _DEFAULT_H = 960, 540
 
@@ -91,9 +138,10 @@ _FALLBACK_CAMERAS: Dict[str, dict] = {
 }
 
 
-def _camera_config(cam_id: str) -> dict:
-    layout = _load_layout()
-    layout_id = _SHORT_TO_LAYOUT.get(cam_id, cam_id)
+def _camera_config(cam_id: str, store_id: Optional[str] = None) -> dict:
+    sid = _resolve_store_id(store_id)
+    layout = _load_layout(sid)
+    layout_id = _short_to_layout(sid).get(cam_id, cam_id)
     if layout_id in layout:
         cfg = dict(layout[layout_id])
         cfg.setdefault("frame_size", [_DEFAULT_W, _DEFAULT_H])
@@ -110,31 +158,33 @@ def _camera_config(cam_id: str) -> dict:
 # ---------------------------------------------------------------------
 # Real-clip mode
 # ---------------------------------------------------------------------
-_CLIPS_DIR_CANDIDATES = ["/data/clips", "data/clips"]
-_DETECTIONS_CANDIDATES = ["/data/detections", "data/detections"]
+_CLIPS_ROOTS = ["/data/clips", "data/clips"]
+_DETECTIONS_ROOTS = ["/data/detections", "data/detections"]
 
 
-def _find_clip_for(cam_id: str) -> Optional[Path]:
-    layout = _load_layout()
-    layout_id = _SHORT_TO_LAYOUT.get(cam_id, cam_id)
-    name_to_camera: Dict[str, str] = {}
-    for s in (json.loads(open(p).read()).get("stores", {}).values() if False else []):
-        pass
-    # Walk the layout's clip_to_camera map.
-    for p in _LAYOUT_CANDIDATES:
-        if os.path.exists(p):
-            try:
-                full = json.loads(open(p, encoding="utf-8").read())
-                for s in full.get("stores", {}).values():
-                    name_to_camera.update(s.get("clip_to_camera", {}) or {})
-            except Exception:
-                pass
-            break
+def _store_clip_dirs(store_id: str) -> List[str]:
+    sub = _store_block(store_id).get("_clips_subdir")
+    if sub:
+        return [str(Path(r) / sub) for r in _CLIPS_ROOTS]
+    return list(_CLIPS_ROOTS)
 
-    for d in _CLIPS_DIR_CANDIDATES:
+
+def _store_detection_dirs(store_id: str) -> List[str]:
+    sub = _store_block(store_id).get("_detections_subdir")
+    if sub:
+        return [str(Path(r) / sub) for r in _DETECTIONS_ROOTS]
+    return list(_DETECTIONS_ROOTS)
+
+
+def _find_clip_for(cam_id: str, store_id: Optional[str] = None) -> Optional[Path]:
+    sid = _resolve_store_id(store_id)
+    layout_id = _short_to_layout(sid).get(cam_id, cam_id)
+    name_to_camera = _store_block(sid).get("clip_to_camera") or {}
+
+    for d in _store_clip_dirs(sid):
         if not os.path.isdir(d):
             continue
-        # Match via clip_to_camera first.
+        # Match via clip_to_camera first (canonical).
         for clip_name, layout_cam in name_to_camera.items():
             if layout_cam == layout_id:
                 f = Path(d) / clip_name
@@ -147,11 +197,17 @@ def _find_clip_for(cam_id: str) -> Optional[Path]:
     return None
 
 
-def _find_detections_for(cam_id: str) -> Optional[Path]:
-    for d in _DETECTIONS_CANDIDATES:
-        f = Path(d) / f"{cam_id}.json"
-        if f.exists():
-            return f
+def _find_detections_for(cam_id: str, store_id: Optional[str] = None) -> Optional[Path]:
+    sid = _resolve_store_id(store_id)
+    # Detection JSON files are named after the canonical layout id
+    # (precompute_detections.py uses clip_to_camera → that id).
+    layout_id = _short_to_layout(sid).get(cam_id, cam_id)
+    candidates = [layout_id, cam_id]
+    for d in _store_detection_dirs(sid):
+        for c in candidates:
+            f = Path(d) / f"{c}.json"
+            if f.exists():
+                return f
     return None
 
 
@@ -270,8 +326,8 @@ class _Actor:
             self.cy = max(self.h / 2, min(fh - self.h / 2, self.cy))
 
 
-def _seed_actors(cam_id: str, fw: int, fh: int) -> List[_Actor]:
-    role = (_camera_config(cam_id) or {}).get("role", "FLOOR")
+def _seed_actors(cam_id: str, fw: int, fh: int, store_id: Optional[str] = None) -> List[_Actor]:
+    role = (_camera_config(cam_id, store_id) or {}).get("role", "FLOOR")
     n = {"ENTRY": 2, "FLOOR": 4, "BILLING": 5}.get(role, 3)
     return [
         _Actor(
@@ -353,11 +409,12 @@ def _wrap_jpeg(jpg: bytes) -> bytes:
 
 
 def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
+                 store_id: str,
                  target_fps: float, max_frames: Optional[int]) -> Iterable[bytes]:
     import cv2  # type: ignore
     det = _load_detections(det_path)
     by_frame = _index_detections(det)
-    cfg = _camera_config(cam_id)
+    cfg = _camera_config(cam_id, store_id)
     role = cfg.get("role", "FLOOR")
     zones = cfg.get("zones") or []
 
@@ -453,13 +510,13 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
             pass
 
 
-def _stream_synth(cam_id: str, target_fps: float,
+def _stream_synth(cam_id: str, store_id: str, target_fps: float,
                   max_frames: Optional[int]) -> Iterable[bytes]:
-    cfg = _camera_config(cam_id)
+    cfg = _camera_config(cam_id, store_id)
     fw, fh = cfg.get("frame_size") or [_DEFAULT_W, _DEFAULT_H]
     role = cfg.get("role", "FLOOR")
     zones = cfg.get("zones") or []
-    actors = _seed_actors(cam_id, fw, fh)
+    actors = _seed_actors(cam_id, fw, fh, store_id)
 
     period = 1.0 / max(1.0, target_fps)
     frame_idx = 0
@@ -486,19 +543,21 @@ def _stream_synth(cam_id: str, target_fps: float,
 # ---------------------------------------------------------------------
 # Public mode helpers (also used by /cameras to advertise capabilities)
 # ---------------------------------------------------------------------
-def camera_mode(cam_id: str) -> dict:
-    clip = _find_clip_for(cam_id)
-    det = _find_detections_for(cam_id)
+def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
+    sid = _resolve_store_id(store_id)
+    clip = _find_clip_for(cam_id, sid)
+    det = _find_detections_for(cam_id, sid)
     if clip and det:
         try:
             d = _load_detections(det)
             n_pop = len(d.get("frames", []))
         except Exception:
             n_pop = 0
+            d = {}
         return {
             "mode": "real",
             "clip": clip.name,
-            "fps": d.get("fps") if 'd' in locals() else None,
+            "fps": d.get("fps"),
             "n_detected_frames": n_pop,
         }
     return {"mode": "sim"}
@@ -508,20 +567,34 @@ def camera_mode(cam_id: str) -> dict:
 # Routes
 # ---------------------------------------------------------------------
 @router.get("/cameras")
-def list_cameras() -> dict:
-    layout = _load_layout()
-    # Expose the user-friendly CAM_1..5 ids; fall back to layout keys.
-    cams = list(_FALLBACK_CAMERAS.keys()) if not layout else list(_SHORT_TO_LAYOUT.keys())
+def list_cameras(store_id: Optional[str] = None) -> dict:
+    """
+    Cameras advertised by the API.
+
+    Without `?store_id=` returns the cameras for the first store in the
+    layout (the legacy STORE_BLR_002, so existing clients keep working).
+    With `?store_id=...` returns the cameras for that store; unknown ids
+    fall back to the default store rather than 404 — keeps the dashboard
+    responsive while a freshly-added store is still being detected on.
+    """
+    sid = _resolve_store_id(store_id)
+    cams = _public_camera_ids(sid)
+    if not cams:
+        # Layout is empty / unreadable — fall back to synthetic ids.
+        cams = list(_FALLBACK_CAMERAS.keys())
     return {
+        "store_id": sid,
+        "stores": _list_store_ids(),
         "cameras": cams,
-        "modes": {c: camera_mode(c) for c in cams},
+        "modes": {c: camera_mode(c, sid) for c in cams},
     }
 
 
 @router.get("/cameras/stream/{cam_id}")
 def camera_stream(cam_id: str, request: Request, fps: float = 0.0,
                   max_frames: Optional[int] = None,
-                  mode: Optional[str] = None) -> StreamingResponse:
+                  mode: Optional[str] = None,
+                  store_id: Optional[str] = None) -> StreamingResponse:
     """
     MJPEG stream.
       mode=real   → require clip + detections, else 503
@@ -530,25 +603,29 @@ def camera_stream(cam_id: str, request: Request, fps: float = 0.0,
 
     fps=0 (default) plays at the clip's native fps. fps>0 caps it
     (use a smaller number for slow-motion analysis on a weak machine).
+
+    `store_id` selects which store's clip/detection set to draw from.
+    Defaults to the first store declared in the layout.
     """
-    clip = _find_clip_for(cam_id)
-    det = _find_detections_for(cam_id)
+    sid = _resolve_store_id(store_id)
+    clip = _find_clip_for(cam_id, sid)
+    det = _find_detections_for(cam_id, sid)
     use_real = (mode == "real") or (mode is None and clip and det)
 
     if use_real and clip and det:
-        gen = _stream_real(clip, det, cam_id, target_fps=fps,
+        gen = _stream_real(clip, det, cam_id, sid, target_fps=fps,
                            max_frames=max_frames)
     elif mode == "real":
         from fastapi import HTTPException
         raise HTTPException(
             status_code=503,
-            detail=f"real mode unavailable for {cam_id}: "
+            detail=f"real mode unavailable for {cam_id} in {sid}: "
                    f"clip={bool(clip)}, detections={bool(det)}",
         )
     else:
         # Synthetic mode keeps a sensible default if the caller did
         # not specify a target rate.
-        gen = _stream_synth(cam_id, target_fps=(fps if fps > 0 else 12.0),
+        gen = _stream_synth(cam_id, sid, target_fps=(fps if fps > 0 else 12.0),
                             max_frames=max_frames)
 
     return StreamingResponse(

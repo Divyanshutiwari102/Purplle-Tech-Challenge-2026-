@@ -4,38 +4,65 @@ import { cameraSrc, jget } from "../api";
 type CamMode = { mode: "real" | "sim"; clip?: string; fps?: number; n_detected_frames?: number };
 
 type CameraInfo = {
+  store_id?: string;
+  stores?: string[];
   cameras: string[];
   modes: Record<string, CamMode>;
 };
 
-const ROLE_BY_CAM: Record<string, { label: string; role: string; overlays: string[] }> = {
-  CAM_1: { label: "Main Entrance",   role: "ENTRY",   overlays: ["Entry Threshold", "Entry Crossing Line"] },
-  CAM_2: { label: "Main Floor",      role: "FLOOR",   overlays: ["Skincare Aisles", "Moisturiser", "Fragrances", "Makeup"] },
-  CAM_3: { label: "Secondary Floor", role: "FLOOR",   overlays: ["Haircare", "Bodycare"] },
-  CAM_4: { label: "Billing Counter", role: "BILLING", overlays: ["Billing Counter"] },
-  CAM_5: { label: "Billing Queue",   role: "BILLING", overlays: ["Billing Queue"] },
+type CamMeta = { label: string; role: string; overlays: string[] };
+
+// Per-store camera metadata. Cameras the layout doesn't know about
+// fall back to a generic FLOOR card so the UI never blanks out.
+const META_BY_STORE: Record<string, Record<string, CamMeta>> = {
+  STORE_BLR_002: {
+    CAM_1: { label: "Main Entrance",   role: "ENTRY",   overlays: ["Entry Threshold", "Entry Crossing Line"] },
+    CAM_2: { label: "Main Floor",      role: "FLOOR",   overlays: ["Skincare Aisles", "Moisturiser", "Fragrances", "Makeup"] },
+    CAM_3: { label: "Secondary Floor", role: "FLOOR",   overlays: ["Haircare", "Bodycare"] },
+    CAM_4: { label: "Billing Counter", role: "BILLING", overlays: ["Billing Counter"] },
+    CAM_5: { label: "Billing Queue",   role: "BILLING", overlays: ["Billing Queue"] },
+  },
+  ST1008: {
+    ENTRY_1:      { label: "Entry Door 1",    role: "ENTRY",   overlays: ["Entry Crossing Line"] },
+    ENTRY_2:      { label: "Entry Door 2",    role: "ENTRY",   overlays: ["Entry Crossing Line"] },
+    ZONE:         { label: "Main Floor",      role: "FLOOR",   overlays: ["Skincare", "Fragrance", "Makeup", "Haircare"] },
+    BILLING_AREA: { label: "Billing Area",    role: "BILLING", overlays: ["Billing Area"] },
+  },
 };
 
-export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
-  const list = cameras.length ? cameras : Object.keys(ROLE_BY_CAM);
+const _DEFAULT_META: CamMeta = { label: "Camera", role: "FLOOR", overlays: [] };
+const _metaFor = (storeId: string, cam: string): CamMeta =>
+  META_BY_STORE[storeId]?.[cam] ?? _DEFAULT_META;
+
+export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ cameras, storeId }) => {
+  const list = cameras.length ? cameras : Object.keys(META_BY_STORE[storeId] ?? {});
   const [active, setActive] = useState(list[0] ?? "CAM_1");
   const [info, setInfo] = useState<CameraInfo | null>(null);
-  const [bumpKey, setBumpKey] = useState(0); // forces <img> re-fetch on speed change
-  // speed multiplier of the clip's native fps. 0 = native (1×).
+  const [bumpKey, setBumpKey] = useState(0); // forces <img> re-fetch on speed/store change
+  // speed multiplier of the clip's native fps. 1 = native.
   const [speed, setSpeed] = useState(1);
+
+  // When the store or the available camera list changes, fall back to
+  // the first camera that actually exists for the new store.
+  useEffect(() => {
+    if (list.length && !list.includes(active)) {
+      setActive(list[0]);
+    }
+  }, [list.join("|")]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true;
-    jget<CameraInfo>("/cameras")
+    jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}`)
       .then((d) => alive && setInfo(d))
       .catch(() => {});
+    setBumpKey((k) => k + 1);
     return () => { alive = false; };
-  }, []);
+  }, [storeId]);
 
   const mode = info?.modes?.[active]?.mode ?? "sim";
   const clip = info?.modes?.[active]?.clip;
   const nativeFps = info?.modes?.[active]?.fps ?? 30;
-  const meta = ROLE_BY_CAM[active] ?? { label: active, role: "FLOOR", overlays: [] };
+  const meta = _metaFor(storeId, active);
 
   // 0 sentinel means "let the server pick native fps", else cap it.
   const fpsParam = speed === 1 ? 0 : nativeFps * speed;
@@ -50,7 +77,7 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
           </div>
           <div className="text-lg font-semibold">
             {meta.label}{" "}
-            <span className="text-xs text-zinc-500">({active})</span>
+            <span className="text-xs text-zinc-500">({active} • {storeId})</span>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -91,8 +118,8 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
             </span>
           </div>
           <img
-            key={`${active}-${bumpKey}`}
-            src={`${cameraSrc(active)}?fps=${fpsParam}`}
+            key={`${storeId}-${active}-${bumpKey}`}
+            src={`${cameraSrc(active, storeId)}${fpsParam ? (cameraSrc(active, storeId).includes("?") ? `&fps=${fpsParam}` : `?fps=${fpsParam}`) : ""}`}
             alt={`${active} ${meta.label}`}
             className="w-full h-full object-contain"
           />
@@ -152,9 +179,9 @@ export const CameraFeed: React.FC<{ cameras: string[] }> = ({ cameras }) => {
       </div>
 
       {/* Camera thumbnail strip */}
-      <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-2">
+      <div className={`mt-4 grid grid-cols-2 gap-2 ${list.length >= 5 ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
         {list.map((c) => {
-          const m = ROLE_BY_CAM[c] ?? { label: c, role: "FLOOR", overlays: [] };
+          const m = _metaFor(storeId, c);
           const cm = info?.modes?.[c]?.mode ?? "sim";
           return (
             <button
