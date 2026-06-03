@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { cameraSrc, jget } from "../api";
+import { cameraSrc } from "../api";
 
 type CamMode = { mode: "real" | "sim"; clip?: string; fps?: number; n_detected_frames?: number };
 
-type CameraInfo = {
+export type CameraInfo = {
   store_id?: string;
   stores?: string[];
   cameras: string[];
@@ -23,10 +23,10 @@ const META_BY_STORE: Record<string, Record<string, CamMeta>> = {
     CAM_5: { label: "Billing Queue",   role: "BILLING", overlays: ["Billing Queue"] },
   },
   ST1008: {
-    ENTRY_1:      { label: "Entry Door 1",    role: "ENTRY",   overlays: ["Entry Crossing Line"] },
-    ENTRY_2:      { label: "Entry Door 2",    role: "ENTRY",   overlays: ["Entry Crossing Line"] },
-    ZONE:         { label: "Main Floor",      role: "FLOOR",   overlays: ["Skincare", "Fragrance", "Makeup", "Haircare"] },
-    BILLING_AREA: { label: "Billing Area",    role: "BILLING", overlays: ["Billing Area"] },
+    ENTRY_1:      { label: "Entry Door 1", role: "ENTRY",   overlays: ["Entry Crossing Line"] },
+    ENTRY_2:      { label: "Entry Door 2", role: "ENTRY",   overlays: ["Entry Crossing Line"] },
+    ZONE:         { label: "Main Floor",   role: "FLOOR",   overlays: ["Skincare", "Fragrance", "Makeup", "Haircare"] },
+    BILLING_AREA: { label: "Billing Area", role: "BILLING", overlays: ["Billing Area"] },
   },
 };
 
@@ -34,38 +34,51 @@ const _DEFAULT_META: CamMeta = { label: "Camera", role: "FLOOR", overlays: [] };
 const _metaFor = (storeId: string, cam: string): CamMeta =>
   META_BY_STORE[storeId]?.[cam] ?? _DEFAULT_META;
 
-export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ cameras, storeId }) => {
-  const list = cameras.length ? cameras : Object.keys(META_BY_STORE[storeId] ?? {});
-  const [active, setActive] = useState(list[0] ?? "CAM_1");
-  const [info, setInfo] = useState<CameraInfo | null>(null);
-  const [bumpKey, setBumpKey] = useState(0); // forces <img> re-fetch on speed/store change
-  // speed multiplier of the clip's native fps. 1 = native.
+type Props = {
+  cameraInfo: CameraInfo | null;
+  storeId: string;
+};
+
+export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
+  // Source of truth: the parent's polled `/cameras?store_id=...` response.
+  // Falls back to the metadata table only while the first poll is in flight,
+  // so the thumbnail strip is never empty.
+  const polledList = cameraInfo?.cameras ?? [];
+  const fallbackList = Object.keys(META_BY_STORE[storeId] ?? {});
+  const list = polledList.length ? polledList : fallbackList;
+
+  const [active, setActive] = useState<string>(list[0] ?? "");
+  const [bumpKey, setBumpKey] = useState(0);   // forces <img> reload on store/speed change
   const [speed, setSpeed] = useState(1);
 
-  // When the store or the available camera list changes, fall back to
-  // the first camera that actually exists for the new store.
+  // Whenever the store changes (or the camera list changes shape),
+  // reset the active camera to the new store's first one and bump
+  // the <img> key so the MJPEG socket reconnects to the new store.
   useEffect(() => {
     if (list.length && !list.includes(active)) {
       setActive(list[0]);
     }
-  }, [list.join("|")]);   // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    let alive = true;
-    jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}`)
-      .then((d) => alive && setInfo(d))
-      .catch(() => {});
     setBumpKey((k) => k + 1);
-    return () => { alive = false; };
-  }, [storeId]);
+  }, [storeId, list.join("|")]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const mode = info?.modes?.[active]?.mode ?? "sim";
-  const clip = info?.modes?.[active]?.clip;
-  const nativeFps = info?.modes?.[active]?.fps ?? 30;
+  const camMode = cameraInfo?.modes?.[active];
+  // While the first /cameras response is in flight, show a "loading" badge
+  // instead of the misleading "synthetic" label.
+  const loading = !cameraInfo;
+  const mode: "real" | "sim" | "loading" = loading
+    ? "loading"
+    : camMode?.mode ?? "sim";
+  const clip = camMode?.clip;
+  const nativeFps = camMode?.fps ?? 30;
   const meta = _metaFor(storeId, active);
 
-  // 0 sentinel means "let the server pick native fps", else cap it.
   const fpsParam = speed === 1 ? 0 : nativeFps * speed;
+  const baseSrc = active ? cameraSrc(active, storeId) : "";
+  const imgSrc = !active
+    ? ""
+    : `${baseSrc}${fpsParam ? (baseSrc.includes("?") ? `&fps=${fpsParam}` : `?fps=${fpsParam}`) : ""}${
+        baseSrc.includes("?") ? `&_k=${bumpKey}` : `?_k=${bumpKey}`
+      }`;
 
   return (
     <div className="bg-panel rounded-xl border border-line p-4">
@@ -77,7 +90,9 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
           </div>
           <div className="text-lg font-semibold">
             {meta.label}{" "}
-            <span className="text-xs text-zinc-500">({active} • {storeId})</span>
+            <span className="text-xs text-zinc-500">
+              ({active || "…"} • {storeId})
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -110,19 +125,33 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
           <div className="absolute top-2 left-2 z-10 flex items-center gap-2 bg-black/70 px-2 py-1 rounded">
             <span
               className={`w-2 h-2 rounded-full ${
-                mode === "real" ? "bg-accent animate-pulse" : "bg-warn"
+                mode === "real"
+                  ? "bg-accent animate-pulse"
+                  : mode === "sim"
+                  ? "bg-warn"
+                  : "bg-zinc-400 animate-pulse"
               }`}
             />
             <span className="text-xs uppercase tracking-wider">
-              {mode === "real" ? "● Live (real CCTV)" : "● Live (synthetic)"}
+              {mode === "real"
+                ? "● Live (real CCTV)"
+                : mode === "sim"
+                ? "● Live (synthetic)"
+                : "● Connecting…"}
             </span>
           </div>
-          <img
-            key={`${storeId}-${active}-${bumpKey}`}
-            src={`${cameraSrc(active, storeId)}${fpsParam ? (cameraSrc(active, storeId).includes("?") ? `&fps=${fpsParam}` : `?fps=${fpsParam}`) : ""}`}
-            alt={`${active} ${meta.label}`}
-            className="w-full h-full object-contain"
-          />
+          {imgSrc ? (
+            <img
+              key={`${storeId}-${active}-${bumpKey}`}
+              src={imgSrc}
+              alt={`${active} ${meta.label}`}
+              className="w-full h-full object-contain"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-zinc-500 text-xs">
+              No cameras for {storeId}
+            </div>
+          )}
         </div>
 
         <aside className="space-y-3">
@@ -139,10 +168,14 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
           <div>
             <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-1">Telemetry</div>
             <div className="grid grid-cols-2 gap-2">
-              <KPI label="Mode"  value={mode === "real" ? "REAL" : "SIM"} tone={mode === "real" ? "ok" : "warn"} />
+              <KPI
+                label="Mode"
+                value={mode === "real" ? "REAL" : mode === "sim" ? "SIM" : "…"}
+                tone={mode === "real" ? "ok" : mode === "sim" ? "warn" : "info"}
+              />
               <KPI label="Speed" value={speed === 1 ? "1×" : `${speed}×`} tone="info" />
-              <KPI label="Source" value={mode === "real" ? "MP4" : "Drawn"} tone="info" />
-              <KPI label="Frames" value={info?.modes?.[active]?.n_detected_frames?.toString() ?? "—"} tone="info" />
+              <KPI label="Source" value={mode === "real" ? "MP4" : mode === "sim" ? "Drawn" : "—"} tone="info" />
+              <KPI label="Frames" value={camMode?.n_detected_frames?.toString() ?? "—"} tone="info" />
             </div>
             <div className="mt-1 text-[11px] text-zinc-500 truncate">
               native: <code>{nativeFps.toFixed(1)} fps</code>
@@ -182,10 +215,10 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
       <div className={`mt-4 grid grid-cols-2 gap-2 ${list.length >= 5 ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
         {list.map((c) => {
           const m = _metaFor(storeId, c);
-          const cm = info?.modes?.[c]?.mode ?? "sim";
+          const cm = cameraInfo?.modes?.[c]?.mode;
           return (
             <button
-              key={c}
+              key={`${storeId}-${c}`}
               onClick={() => setActive(c)}
               className={`text-left rounded-lg border p-2 transition ${
                 active === c
@@ -200,7 +233,7 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
               <div className="flex items-center gap-1 mt-1">
                 <span
                   className={`w-1.5 h-1.5 rounded-full ${
-                    cm === "real" ? "bg-accent" : "bg-warn"
+                    cm === "real" ? "bg-accent" : cm === "sim" ? "bg-warn" : "bg-zinc-500"
                   }`}
                 />
                 <span className="text-[10px] text-zinc-500">{c}</span>
@@ -213,7 +246,9 @@ export const CameraFeed: React.FC<{ cameras: string[]; storeId: string }> = ({ c
       <div className="mt-2 text-[11px] text-zinc-500">
         {mode === "real"
           ? "Real CCTV frames with YOLO bounding boxes overlaid. Detections were pre-computed once via pipeline.precompute_detections; the boxes you see are the actual model output replayed in sync with the clip. Footage is challenge-licensed and never leaves the local container."
-          : "Synthetic frames with bounding boxes, zone polygons and HUD. The repo runs in this mode by default; drop the licensed clips into data/clips/ and the matching detections into data/detections/ to switch to real CCTV."}
+          : mode === "sim"
+          ? "Synthetic frames with bounding boxes, zone polygons and HUD. The repo runs in this mode by default; drop the licensed clips into data/clips/ and the matching detections into data/detections/ to switch to real CCTV."
+          : "Waiting for /cameras response — telemetry will populate once the API replies."}
       </div>
     </div>
   );

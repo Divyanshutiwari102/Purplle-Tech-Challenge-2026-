@@ -408,9 +408,19 @@ def _wrap_jpeg(jpg: bytes) -> bytes:
     )
 
 
-def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
-                 store_id: str,
-                 target_fps: float, max_frames: Optional[int]) -> Iterable[bytes]:
+async def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
+                       store_id: str,
+                       target_fps: float, max_frames: Optional[int]):
+    """Async MJPEG generator.
+
+    Sync generators served via fastapi's `StreamingResponse` reserve
+    one thread from the (small) anyio default pool while they sleep
+    between frames — open a couple of cameras and the whole API
+    starts queueing requests. Making this async keeps frame pacing
+    on the event loop so dozens of streams can coexist without
+    starving the thread pool.
+    """
+    import asyncio
     import cv2  # type: ignore
     det = _load_detections(det_path)
     by_frame = _index_detections(det)
@@ -421,11 +431,6 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
     src_fps = float(det.get("fps") or 30.0)
     stride = int(det.get("stride") or 1)
 
-    # Auto target fps: match the source unless the caller explicitly
-    # asks for slower playback. This is what kills the "0.5x slow"
-    # feel — at stride=5 we still play every frame at 30 fps; the
-    # bbox positions interpolate linearly between detections so the
-    # rectangle slides smoothly instead of jumping every 5 frames.
     play_fps = target_fps if target_fps > 0 else src_fps
     period = 1.0 / max(1.0, play_fps)
 
@@ -481,26 +486,36 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
     if not cap.isOpened():
         return
 
+    def _read_one():
+        ok, frame = cap.read()
+        if not ok:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+        return ok, frame
+
     emitted = 0
     frame_idx = 0
     try:
         while True:
-            ok, frame = cap.read()
+            # Decode + render are CPU-heavy at 1080p; run them off the
+            # event loop so other concurrent streams (and the rest of
+            # the API) keep responding.
+            ok, frame = await asyncio.to_thread(_read_one)
             if not ok:
-                # Loop the clip seamlessly.
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                frame_idx = 0
-                continue
+                # Stream is over and we couldn't loop — bail.
+                return
 
             boxes = _interp_boxes(frame_idx)
-            jpg = _render_real(frame, frame_idx, boxes, play_fps,
-                               cam_id, role, zones)
+            jpg = await asyncio.to_thread(
+                _render_real, frame, frame_idx, boxes, play_fps,
+                cam_id, role, zones,
+            )
             yield _wrap_jpeg(jpg)
             emitted += 1
             if max_frames is not None and emitted >= max_frames:
                 return
             frame_idx += 1
-            time.sleep(period)
+            await asyncio.sleep(period)
     except (BrokenPipeError, ConnectionResetError, GeneratorExit):
         return
     finally:
@@ -510,8 +525,9 @@ def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
             pass
 
 
-def _stream_synth(cam_id: str, store_id: str, target_fps: float,
-                  max_frames: Optional[int]) -> Iterable[bytes]:
+async def _stream_synth(cam_id: str, store_id: str, target_fps: float,
+                        max_frames: Optional[int]):
+    import asyncio
     cfg = _camera_config(cam_id, store_id)
     fw, fh = cfg.get("frame_size") or [_DEFAULT_W, _DEFAULT_H]
     role = cfg.get("role", "FLOOR")
@@ -529,13 +545,16 @@ def _stream_synth(cam_id: str, store_id: str, target_fps: float,
             last = now
             for a in actors:
                 a.step(dt, fw, fh)
-            jpg = _render_synth(cam_id, frame_idx, actors, target_fps, fw, fh, role, zones)
+            jpg = await asyncio.to_thread(
+                _render_synth, cam_id, frame_idx, actors,
+                target_fps, fw, fh, role, zones,
+            )
             yield _wrap_jpeg(jpg)
             emitted += 1
             frame_idx += 1
             if max_frames is not None and emitted >= max_frames:
                 return
-            time.sleep(period)
+            await asyncio.sleep(period)
     except (BrokenPipeError, ConnectionResetError, GeneratorExit):
         return
 

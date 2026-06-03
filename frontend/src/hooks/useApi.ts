@@ -24,6 +24,13 @@ type Funnel = {
 type Heatmap = { zones: Array<any> };
 type Anomalies = { anomalies: Array<any> };
 type Health = { status: string; uptime_seconds: number; stale_feeds: string[]; last_event_per_store: Record<string, string> };
+type CamMode = { mode: "real" | "sim"; clip?: string; fps?: number; n_detected_frames?: number };
+type CameraInfo = {
+  store_id?: string;
+  stores?: string[];
+  cameras: string[];
+  modes: Record<string, CamMode>;
+};
 
 export function useDashboard(storeId: string) {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
@@ -33,9 +40,19 @@ export function useDashboard(storeId: string) {
   const [health, setHealth] = useState<Health | null>(null);
   const [events, setEvents] = useState<TickEvent[]>([]);
   const [queueSeries, setQueueSeries] = useState<Array<{ ts: number; depth: number }>>([]);
-  const [cameras, setCameras] = useState<string[]>([]);
+  const [cameraInfo, setCameraInfo] = useState<CameraInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sseRef = useRef<EventSource | null>(null);
+
+  // When the active store changes, immediately drop cached camera data
+  // so the CameraFeed component re-renders with the new store's data
+  // on the next tick instead of briefly flashing the previous store's
+  // thumbnail strip.
+  useEffect(() => {
+    setCameraInfo(null);
+    setEvents([]);
+    setQueueSeries([]);
+  }, [storeId]);
 
   // Polling refresh of summary endpoints (cheap, 3s).
   useEffect(() => {
@@ -49,7 +66,7 @@ export function useDashboard(storeId: string) {
           jget<Heatmap>(`/stores/${storeId}/heatmap`),
           jget<Anomalies>(`/stores/${storeId}/anomalies`),
           jget<Health>(`/health`),
-          jget<{ cameras: string[] }>(`/cameras?store_id=${encodeURIComponent(storeId)}`),
+          jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}&_t=${Date.now()}`),
         ]);
         if (!alive) return;
         setMetrics(m);
@@ -57,7 +74,7 @@ export function useDashboard(storeId: string) {
         setHeatmap(h);
         setAnomalies(a);
         setHealth(hl);
-        setCameras(c.cameras);
+        setCameraInfo(c);
         setQueueSeries((prev) =>
           [...prev, { ts: Date.now(), depth: m.current_queue_depth }].slice(-120)
         );
@@ -110,5 +127,5 @@ export function useDashboard(storeId: string) {
     }
   }, [storeId]);
 
-  return { metrics, funnel, heatmap, anomalies, health, events, queueSeries, cameras, error, apiBase };
+  return { metrics, funnel, heatmap, anomalies, health, events, queueSeries, cameraInfo, error, apiBase };
 }

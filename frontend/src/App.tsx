@@ -126,7 +126,7 @@ const App: React.FC = () => {
       {/* main grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
-          <CameraFeed cameras={dash.cameras} storeId={storeId} />
+          <CameraFeed cameraInfo={dash.cameraInfo} storeId={storeId} />
           <div className="bg-panel rounded-xl border border-line p-4">
             <h2 className="text-sm font-medium mb-3">Conversion funnel</h2>
             <FunnelChart data={dash.funnel} />
@@ -156,7 +156,7 @@ const App: React.FC = () => {
       <footer className="mt-6 text-xs text-zinc-500 flex flex-wrap gap-3">
         <span>API: <code>{dash.apiBase}</code></span>
         <span>Store: <code>{storeId}</code></span>
-        <span>Cameras: {dash.cameras.join(", ") || "—"}</span>
+        <span>Cameras: {(dash.cameraInfo?.cameras ?? []).join(", ") || "—"}</span>
       </footer>
     </div>
   );
