@@ -1,7 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { cameraSrc } from "../api";
 
-type CamMode = { mode: "real" | "sim"; clip?: string; fps?: number; n_detected_frames?: number };
+type CamMode = {
+  mode: "real" | "sim";
+  role?: string;
+  clip?: string;
+  fps?: number;
+  n_detected_frames?: number;
+  frame_w?: number;
+  frame_h?: number;
+};
 
 export type CameraInfo = {
   store_id?: string;
@@ -80,6 +88,13 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
         baseSrc.includes("?") ? `&_k=${bumpKey}` : `?_k=${bumpKey}`
       }`;
 
+  // Size the video container to match the clip's actual aspect ratio so a
+  // portrait clip (e.g. ST1008's billing_area, 960×1080) doesn't render as
+  // a tiny strip inside a 16:9 letterbox.
+  const fw = camMode?.frame_w ?? 1920;
+  const fh = camMode?.frame_h ?? 1080;
+  const aspectStyle = { aspectRatio: `${fw} / ${fh}` };
+
   return (
     <div className="bg-panel rounded-xl border border-line p-4">
       {/* Top header: title + speed presets */}
@@ -120,7 +135,10 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
 
       {/* Main: video + telemetry sidebar */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-4">
-        <div className="relative rounded-lg overflow-hidden border border-line bg-black aspect-video">
+        <div
+          className="relative rounded-lg overflow-hidden border border-line bg-black mx-auto w-full max-w-full"
+          style={{ ...aspectStyle, maxHeight: "60vh" }}
+        >
           {/* Mode badge */}
           <div className="absolute top-2 left-2 z-10 flex items-center gap-2 bg-black/70 px-2 py-1 rounded">
             <span

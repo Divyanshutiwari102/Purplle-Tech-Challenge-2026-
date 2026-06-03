@@ -58,6 +58,7 @@ _state: Dict[str, object] = {
     "running": False,
     "speed": 1.0,
     "cam_id": None,
+    "store_id": "STORE_BLR_002",
     "started_at": None,
     "events_replayed": 0,
     "transactions_emitted": 0,
@@ -92,7 +93,7 @@ def _iter_events(events_dir: Path) -> Iterator[dict]:
                         continue
 
 
-def _synthetic_events(cam_id: Optional[str]) -> Iterator[dict]:
+def _synthetic_events(cam_id: Optional[str], store_id: str = "STORE_BLR_002") -> Iterator[dict]:
     """
     Fallback: generate believable visitor journeys when no pre-recorded
     JSONL is available. Produces diverse traffic across zones so the
@@ -103,14 +104,32 @@ def _synthetic_events(cam_id: Optional[str]) -> Iterator[dict]:
     window is 5 minutes — without spreading, every txn matches every
     session and conversion_rate inflates to ~70%. With spreading, the
     rate settles in the realistic 25-35% band.
+
+    `store_id` selects which store (and therefore which cameras + zones)
+    the synthetic visitors flow through. STORE_BLR_002 uses the v1
+    layout (CAM_ENTRY_01 / CAM_FLOOR_01 / CAM_BILLING_01 + 6 zones).
+    ST1008 uses the v2 Store-2 layout (ENTRY_1 / ZONE / BILLING_AREA +
+    its 4 zones). Anything else falls back to the BLR_002 cams.
     """
     import random
+
+    # Per-store choice of (entry_cam, floor_cam, billing_cam, zone_pool).
+    PER_STORE = {
+        "STORE_BLR_002": (
+            "CAM_ENTRY_01", "CAM_FLOOR_01", "CAM_BILLING_01",
+            ["SKINCARE", "MOISTURISER", "FRAGRANCE", "MAKEUP",
+             "HAIRCARE", "BODYCARE"],
+        ),
+        "ST1008": (
+            "ENTRY_1", "ZONE", "BILLING_AREA",
+            ["SKINCARE", "FRAGRANCE", "MAKEUP", "HAIRCARE"],
+        ),
+    }
+    entry_cam, floor_cam, billing_cam, zone_rotation = PER_STORE.get(
+        store_id, PER_STORE["STORE_BLR_002"],
+    )
+
     seq = 0
-    # Rotate through zones so every zone fires regularly.
-    zone_rotation = [
-        "SKINCARE", "MOISTURISER", "FRAGRANCE", "MAKEUP",
-        "HAIRCARE", "BODYCARE",
-    ]
     while True:
         seq += 1
         vid = f"VIS_sim{seq:04d}"
@@ -127,14 +146,14 @@ def _synthetic_events(cam_id: Optional[str]) -> Iterator[dict]:
         base = datetime.now(timezone.utc) - timedelta(seconds=offset_seconds)
 
         cycle: list[tuple[str, str, Optional[str], int, Optional[int]]] = [
-            ("ENTRY",            "CAM_ENTRY_01",    None,  0,      None),
-            ("ZONE_ENTER",       "CAM_FLOOR_01",    zone,  0,      None),
-            ("ZONE_DWELL",       "CAM_FLOOR_01",    zone,  30000,  None),
+            ("ENTRY",            entry_cam,    None,  0,      None),
+            ("ZONE_ENTER",       floor_cam,    zone,  0,      None),
+            ("ZONE_DWELL",       floor_cam,    zone,  30000,  None),
         ]
         if reaches_billing:
-            cycle.append(("BILLING_QUEUE_JOIN", "CAM_BILLING_01", "BILLING", 0,
+            cycle.append(("BILLING_QUEUE_JOIN", billing_cam, "BILLING", 0,
                           random.randint(2, 7)))
-        cycle.append(("EXIT", "CAM_ENTRY_01", None, 0, None))
+        cycle.append(("EXIT", entry_cam, None, 0, None))
 
         # 30 s between events within a single visitor's session — that's a
         # realistic dwell. The whole session takes ~2 minutes.
@@ -142,7 +161,7 @@ def _synthetic_events(cam_id: Optional[str]) -> Iterator[dict]:
             ev_ts = base + timedelta(seconds=i * 30)
             yield {
                 "event_id":   str(uuid.uuid4()),
-                "store_id":   "STORE_BLR_002",
+                "store_id":   store_id,
                 "camera_id":  cam_id or cam,
                 "visitor_id": vid,
                 "event_type": et,
@@ -235,7 +254,10 @@ def _replay_loop(stop_flag: threading.Event) -> None:
         src = _iter_events(events_dir)
         _state["events_dir"] = str(events_dir)
     else:
-        src = _synthetic_events(_state.get("cam_id"))
+        src = _synthetic_events(
+            _state.get("cam_id"),
+            store_id=str(_state.get("store_id") or "STORE_BLR_002"),
+        )
         _state["events_dir"] = "synthetic"
 
     while not stop_flag.is_set():
@@ -246,7 +268,10 @@ def _replay_loop(stop_flag: threading.Event) -> None:
             if use_recorded:
                 src = _iter_events(events_dir)
             else:
-                src = _synthetic_events(_state.get("cam_id"))
+                src = _synthetic_events(
+                    _state.get("cam_id"),
+                    store_id=str(_state.get("store_id") or "STORE_BLR_002"),
+                )
             continue
 
         if not _filter_cam(raw, _state.get("cam_id")):
@@ -309,23 +334,44 @@ def _replay_loop(stop_flag: threading.Event) -> None:
             break
 
 
-def _start(speed: float, cam_id: Optional[str]) -> dict:
+def _start(speed: float, cam_id: Optional[str],
+           store_id: Optional[str] = None) -> dict:
+    new_store = store_id or "STORE_BLR_002"
+    t: Optional[threading.Thread] = None
     with _state_lock:
-        if _state.get("running"):
+        # If a different store is already running, stop it first so the
+        # user's most recent intent wins. Without this, clicking Start
+        # on the second store would silently keep emitting events for
+        # the first one.
+        if (_state.get("running")
+                and _state.get("store_id") != new_store):
+            flag = _state.get("stop_flag")
+            if flag is not None:
+                flag.set()
+            prev_t = _state.get("thread")
+            t = prev_t if isinstance(prev_t, threading.Thread) else None
+            _state["running"] = False
+        elif _state.get("running"):
             return _status_unlocked()
+    # Briefly release the lock so the previous loop can observe the
+    # stop flag and exit; then re-acquire to spin up the new one.
+    if t is not None:
+        t.join(timeout=2.0)
+    with _state_lock:
         stop_flag = threading.Event()
-        t = threading.Thread(target=_replay_loop, args=(stop_flag,), daemon=True)
+        new_t = threading.Thread(target=_replay_loop, args=(stop_flag,), daemon=True)
         _state.update({
             "running": True,
             "speed": float(speed),
             "cam_id": cam_id,
+            "store_id": new_store,
             "started_at": time.time(),
             "events_replayed": 0,
             "transactions_emitted": 0,
             "stop_flag": stop_flag,
-            "thread": t,
+            "thread": new_t,
         })
-        t.start()
+        new_t.start()
         return _status_unlocked()
 
 
@@ -350,6 +396,7 @@ def _status_unlocked() -> dict:
         "running": bool(_state.get("running")),
         "speed": float(_state.get("speed", 1.0) or 1.0),
         "cam_id": _state.get("cam_id"),
+        "store_id": _state.get("store_id") or "STORE_BLR_002",
         "started_at": _state.get("started_at"),
         "events_replayed": int(_state.get("events_replayed", 0)),
         "transactions_emitted": int(_state.get("transactions_emitted", 0)),
@@ -361,10 +408,11 @@ def _status_unlocked() -> dict:
 # HTTP handlers
 # ---------------------------------------------------------------------
 @router.post("/simulation/start")
-def simulation_start(speed: float = 1.0, cam_id: Optional[str] = None) -> dict:
+def simulation_start(speed: float = 1.0, cam_id: Optional[str] = None,
+                     store_id: Optional[str] = None) -> dict:
     if speed <= 0:
         raise HTTPException(status_code=400, detail="speed must be > 0")
-    return _start(speed, cam_id)
+    return _start(speed, cam_id, store_id=store_id)
 
 
 @router.post("/simulation/stop")

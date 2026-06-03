@@ -18,8 +18,25 @@ const App: React.FC = () => {
   const [simRunning, setSimRunning] = useState(false);
   const [simSpeed, setSimSpeed] = useState(1);
 
+  // Reflect the simulation manager's state across page reloads and
+  // store switches. Without this, hitting "Start 1×" on STORE_BLR_002,
+  // switching to ST1008 and clicking "Start 1×" again silently no-ops
+  // because the manager is already running for the other store.
+  React.useEffect(() => {
+    let alive = true;
+    fetch(`/api/simulation/status`)
+      .then((r) => r.json())
+      .then((s) => {
+        if (!alive) return;
+        setSimRunning(!!s.running);
+        if (s.speed) setSimSpeed(Number(s.speed));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [storeId]);
+
   const startSim = async (speed: number) => {
-    await jpost(`/simulation/start?speed=${speed}`);
+    await jpost(`/simulation/start?speed=${speed}&store_id=${encodeURIComponent(storeId)}`);
     setSimRunning(true);
     setSimSpeed(speed);
   };

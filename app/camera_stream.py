@@ -564,6 +564,9 @@ async def _stream_synth(cam_id: str, store_id: str, target_fps: float,
 # ---------------------------------------------------------------------
 def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
     sid = _resolve_store_id(store_id)
+    cfg = _camera_config(cam_id, sid) or {}
+    fw, fh = (cfg.get("frame_size") or [_DEFAULT_W, _DEFAULT_H])
+    role = cfg.get("role", "FLOOR")
     clip = _find_clip_for(cam_id, sid)
     det = _find_detections_for(cam_id, sid)
     if clip and det:
@@ -573,13 +576,26 @@ def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
         except Exception:
             n_pop = 0
             d = {}
+        # Prefer the detector's frame_size (matches the actual mp4
+        # resolution) over the layout's declared one — a clip recorded
+        # in portrait will report [960, 1080] which the React panel
+        # uses to size its container correctly.
+        det_size = d.get("frame_size") or [fw, fh]
         return {
             "mode": "real",
+            "role": role,
             "clip": clip.name,
             "fps": d.get("fps"),
             "n_detected_frames": n_pop,
+            "frame_w": int(det_size[0]),
+            "frame_h": int(det_size[1]),
         }
-    return {"mode": "sim"}
+    return {
+        "mode": "sim",
+        "role": role,
+        "frame_w": int(fw),
+        "frame_h": int(fh),
+    }
 
 
 # ---------------------------------------------------------------------
