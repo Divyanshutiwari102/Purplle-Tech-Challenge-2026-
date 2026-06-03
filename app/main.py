@@ -67,8 +67,14 @@ app.include_router(simulation_router)
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     init_db()
+    # Pre-warm camera posters in the background so the first dashboard
+    # load after a restart doesn't pay the per-camera render cost on
+    # the request path. Fire-and-forget; failures are non-fatal.
+    import asyncio
+    from .camera_stream import prewarm_posters
+    asyncio.create_task(prewarm_posters())
 
 
 # ---------------------------------------------------------------------

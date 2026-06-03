@@ -786,3 +786,25 @@ async def camera_poster(cam_id: str,
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=60"},
     )
+
+
+async def prewarm_posters() -> None:
+    """Render every store's posters into _POSTER_CACHE up-front.
+
+    Called from the app's startup hook in a background task. Without
+    this, the first dashboard load after a container restart pays the
+    cv2-seek + render cost (~1s each) for all 9 cameras at once while
+    the browser is also polling — which is what made the first reload
+    feel slow. Pre-warming moves that cost to boot time (off the
+    request path) so the first paint is instant.
+    """
+    for sid in (_list_store_ids() or ["STORE_BLR_002"]):
+        for cam in _public_camera_ids(sid):
+            key = (sid, cam)
+            if key in _POSTER_CACHE:
+                continue
+            try:
+                _POSTER_CACHE[key] = await _build_poster(cam, sid)
+            except Exception:
+                # Leave it uncached; the route will lazily retry.
+                pass
