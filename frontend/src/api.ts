@@ -33,4 +33,10 @@ export const cameraSrc = (camId: string, storeId?: string) =>
   storeId
     ? `${BASE}/cameras/stream/${camId}?store_id=${encodeURIComponent(storeId)}`
     : `${BASE}/cameras/stream/${camId}`;
+// Single-frame JPEG poster for thumbnails — static so the browser
+// doesn't allocate one of its 6 per-host connections to each thumb.
+export const posterSrc = (camId: string, storeId?: string) =>
+  storeId
+    ? `${BASE}/cameras/poster/${camId}?store_id=${encodeURIComponent(storeId)}`
+    : `${BASE}/cameras/poster/${camId}`;
 export const sseUrl = (storeId: string) => `${BASE}/stores/${storeId}/stream`;

@@ -51,21 +51,14 @@ def correlate_pos(
       transactions match.
 
     Implementation:
-      • Pull all transactions in [window_start, window_end].
-      • For each, find sessions with a BILLING_QUEUE_JOIN or
-        ZONE_ENTER(billing) event in [txn-5min, txn].
-      • Mark those sessions converted; deduplicate by session_id.
+      • Single SQL JOIN: transactions × events (billing) × sessions,
+        filtering events into [txn-5min, txn]. The earlier per-txn
+        loop was O(transactions × index_scan) and turned into a
+        6-second `/anomalies` response under simulation load.
       • total_sessions = unique non-staff sessions whose entry_time
         falls in the window.
     """
     conn = get_connection(db_path)
-
-    txns = conn.execute(
-        "SELECT transaction_id, timestamp FROM transactions "
-        "WHERE store_id = ? AND timestamp BETWEEN ? AND ? "
-        "ORDER BY timestamp",
-        (store_id, window_start, window_end),
-    ).fetchall()
 
     # Total non-staff sessions in window.
     total = conn.execute(
@@ -74,35 +67,40 @@ def correlate_pos(
         "  AND entry_time BETWEEN ? AND ?",
         (store_id, window_start, window_end),
     ).fetchone()[0]
-
-    if not txns or total == 0:
+    if total == 0:
         return 0, total
 
-    converted_sessions: set[str] = set()
-    for txn in txns:
-        txn_ts = datetime.fromisoformat(txn["timestamp"].replace("Z", "+00:00"))
-        five_min_before = _iso(txn_ts - timedelta(minutes=5))
-        rows = conn.execute(
-            """
+    # Single JOIN: each row is one matched (txn, session) pair. SQLite
+    # uses idx_txn_store_ts to bound transactions and idx_events_store_ts
+    # to bound events; visitor_id matches via idx_events_visitor /
+    # idx_sessions_visitor. The DISTINCT collapses sessions matched by
+    # multiple txns or multiple billing events.
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
             SELECT DISTINCT s.session_id
-            FROM visitor_sessions s
+            FROM transactions t
             JOIN events e
-              ON e.visitor_id = s.visitor_id
-             AND e.store_id  = s.store_id
-            WHERE s.store_id = ?
-              AND s.is_staff = 0
-              AND e.timestamp BETWEEN ? AND ?
-              AND (
-                   e.event_type = 'BILLING_QUEUE_JOIN'
-                OR (e.event_type IN ('ZONE_ENTER','ZONE_DWELL')
-                    AND e.zone_id LIKE 'BILLING%')
-              )
-            """,
-            (store_id, five_min_before, txn["timestamp"]),
-        ).fetchall()
-        converted_sessions.update(r["session_id"] for r in rows)
-
-    return len(converted_sessions), total
+              ON e.store_id = t.store_id
+             AND e.timestamp >= datetime(t.timestamp, '-5 minutes')
+             AND e.timestamp <= t.timestamp
+             AND (
+                  e.event_type = 'BILLING_QUEUE_JOIN'
+               OR (e.event_type IN ('ZONE_ENTER','ZONE_DWELL')
+                   AND e.zone_id LIKE 'BILLING%')
+             )
+            JOIN visitor_sessions s
+              ON s.visitor_id = e.visitor_id
+             AND s.store_id   = e.store_id
+             AND s.is_staff   = 0
+            WHERE t.store_id = ?
+              AND t.timestamp BETWEEN ? AND ?
+        )
+        """,
+        (store_id, window_start, window_end),
+    ).fetchone()
+    converted = int(row[0] or 0)
+    return converted, total
 
 
 # ---------------------------------------------------------------------

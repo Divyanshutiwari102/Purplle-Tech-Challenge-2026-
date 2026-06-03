@@ -54,35 +54,65 @@ export function useDashboard(storeId: string) {
     setQueueSeries([]);
   }, [storeId]);
 
-  // Polling refresh of summary endpoints (cheap, 3s).
+  // /cameras is essentially static (clip + detection metadata), so it
+  // doesn't need to be polled. Fetch it once per store change. Keeping
+  // it out of the periodic loop frees one of the browser's six
+  // per-host connections — important when SSE + MJPEG are also open.
+  useEffect(() => {
+    let alive = true;
+    jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}`)
+      .then((c) => alive && setCameraInfo(c))
+      .catch(() => {
+        // Retry once after 2s — if the API was slow during a sim
+        // start, the next attempt usually succeeds.
+        setTimeout(() => {
+          if (!alive) return;
+          jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}`)
+            .then((c) => alive && setCameraInfo(c))
+            .catch(() => {});
+        }, 2000);
+      });
+    return () => { alive = false; };
+  }, [storeId]);
+
+  // Polling refresh of summary endpoints. Runs requests sequentially
+  // (not Promise.all) so we never hold > 1 fetch connection in flight
+  // — the rest of the per-host pool stays available for SSE and MJPEG.
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
       try {
-        const [m, f, h, a, hl, c] = await Promise.all([
-          jget<Metrics>(`/stores/${storeId}/metrics`),
-          jget<Funnel>(`/stores/${storeId}/funnel`),
-          jget<Heatmap>(`/stores/${storeId}/heatmap`),
-          jget<Anomalies>(`/stores/${storeId}/anomalies`),
-          jget<Health>(`/health`),
-          jget<CameraInfo>(`/cameras?store_id=${encodeURIComponent(storeId)}&_t=${Date.now()}`),
-        ]);
+        const m = await jget<Metrics>(`/stores/${storeId}/metrics`);
         if (!alive) return;
         setMetrics(m);
-        setFunnel(f);
-        setHeatmap(h);
-        setAnomalies(a);
-        setHealth(hl);
-        setCameraInfo(c);
         setQueueSeries((prev) =>
           [...prev, { ts: Date.now(), depth: m.current_queue_depth }].slice(-120)
         );
+
+        const f = await jget<Funnel>(`/stores/${storeId}/funnel`);
+        if (!alive) return;
+        setFunnel(f);
+
+        const h = await jget<Heatmap>(`/stores/${storeId}/heatmap`);
+        if (!alive) return;
+        setHeatmap(h);
+
+        const a = await jget<Anomalies>(`/stores/${storeId}/anomalies`);
+        if (!alive) return;
+        setAnomalies(a);
+
+        const hl = await jget<Health>(`/health`);
+        if (!alive) return;
+        setHealth(hl);
+
         setError(null);
       } catch (e: any) {
-        setError(e?.message ?? "request failed");
+        if (alive) setError(e?.message ?? "request failed");
       } finally {
-        if (alive) timer = setTimeout(tick, 3000);
+        // 5s instead of 3s — at 3s with sim hammering the DB the
+        // anomalies endpoint sometimes ran longer than the interval.
+        if (alive) timer = setTimeout(tick, 5000);
       }
     };
     tick();

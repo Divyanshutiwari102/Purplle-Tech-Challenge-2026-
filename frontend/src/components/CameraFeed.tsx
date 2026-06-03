@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { cameraSrc } from "../api";
+import { cameraSrc, posterSrc } from "../api";
 
 type CamMode = {
   mode: "real" | "sim";
@@ -238,23 +238,40 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
             <button
               key={`${storeId}-${c}`}
               onClick={() => setActive(c)}
-              className={`text-left rounded-lg border p-2 transition ${
+              className={`text-left rounded-lg border overflow-hidden transition ${
                 active === c
                   ? "bg-panel2 border-accent"
                   : "bg-panel2/60 border-line hover:border-accent/40"
               }`}
             >
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">
-                {m.role}
-              </div>
-              <div className="text-sm font-medium truncate">{m.label}</div>
-              <div className="flex items-center gap-1 mt-1">
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    cm === "real" ? "bg-accent" : cm === "sim" ? "bg-warn" : "bg-zinc-500"
-                  }`}
+              {/* Static poster — single JPEG, cacheable, doesn't
+                  hold an MJPEG socket. Unlike <img src={mjpeg}>
+                  which would cost one of the browser's six
+                  per-host connections per thumbnail. */}
+              <div className="aspect-video bg-black">
+                <img
+                  src={posterSrc(c, storeId)}
+                  alt={`${c} preview`}
+                  loading="lazy"
+                  className="w-full h-full object-cover"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.opacity = "0.2";
+                  }}
                 />
-                <span className="text-[10px] text-zinc-500">{c}</span>
+              </div>
+              <div className="p-2">
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+                  {m.role}
+                </div>
+                <div className="text-sm font-medium truncate">{m.label}</div>
+                <div className="flex items-center gap-1 mt-1">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      cm === "real" ? "bg-accent" : cm === "sim" ? "bg-warn" : "bg-zinc-500"
+                    }`}
+                  />
+                  <span className="text-[10px] text-zinc-500">{c}</span>
+                </div>
               </div>
             </button>
           );

@@ -668,3 +668,121 @@ def camera_stream(cam_id: str, request: Request, fps: float = 0.0,
         media_type=f"multipart/x-mixed-replace; boundary={_BOUNDARY}",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# Module-level cache for poster frames keyed by (store_id, cam_id).
+# A poster is a single rendered JPEG, identical in look to the first
+# frame of the MJPEG stream — used by the thumbnail strip so 4-5
+# thumbnails don't each occupy one of the browser's six per-host
+# connections (the MJPEG stream holds its connection forever).
+_POSTER_CACHE: Dict[Tuple[str, str], bytes] = {}
+
+
+async def _build_poster(cam_id: str, store_id: str) -> bytes:
+    """Render one JPEG frame for the given camera + store.
+
+    Reuses the same drawing primitives as the MJPEG path so the
+    poster matches the live stream pixel-for-pixel. Falls back to
+    the synthetic renderer when the clip / detections aren't there.
+    """
+    import asyncio
+    clip = _find_clip_for(cam_id, store_id)
+    det = _find_detections_for(cam_id, store_id)
+    cfg = _camera_config(cam_id, store_id)
+    role = cfg.get("role", "FLOOR")
+    zones = cfg.get("zones") or []
+
+    if clip and det:
+        import cv2  # type: ignore
+        det_obj = _load_detections(det)
+        by_frame = _index_detections(det_obj)
+        det_indices = sorted(by_frame.keys())
+
+        def _grab_first():
+            cap = cv2.VideoCapture(str(clip))
+            try:
+                # Seek to the first frame that has detections — this
+                # gives a richer poster than the very first frame
+                # (which is often empty before anyone enters).
+                if det_indices:
+                    target = det_indices[len(det_indices) // 2]
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                ok, frame = cap.read()
+                if not ok:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = cap.read()
+                return ok, frame, (det_indices[len(det_indices) // 2]
+                                   if det_indices else 0)
+            finally:
+                cap.release()
+
+        ok, frame, frame_idx = await asyncio.to_thread(_grab_first)
+        if ok:
+            boxes = by_frame.get(frame_idx, [])
+            return await asyncio.to_thread(
+                _render_real, frame, frame_idx, boxes,
+                float(det_obj.get("fps") or 30.0),
+                cam_id, role, zones,
+            )
+
+    # Synthetic fallback.
+    fw, fh = cfg.get("frame_size") or [_DEFAULT_W, _DEFAULT_H]
+    actors = _seed_actors(cam_id, fw, fh, store_id)
+    return await asyncio.to_thread(
+        _render_synth, cam_id, 0, actors, 12.0, fw, fh, role, zones,
+    )
+
+
+@router.get("/cameras/poster/{cam_id}")
+async def camera_poster(cam_id: str,
+                        store_id: Optional[str] = None,
+                        refresh: int = 0):
+    """
+    Single JPEG for `cam_id` (one frame, not MJPEG).
+
+    Designed for the React thumbnail strip — 4–5 thumbnails would
+    each open an MJPEG socket and exhaust the browser's six
+    per-host connection slots, leaving none for fetch / SSE / the
+    main camera. A static poster is cached per (store, cam) and
+    served as a normal cacheable image instead.
+
+    `?refresh=1` busts the cache (useful when the underlying
+    detections are regenerated mid-session).
+    """
+    from fastapi.responses import Response
+    sid = _resolve_store_id(store_id)
+    key = (sid, cam_id)
+    if refresh or key not in _POSTER_CACHE:
+        try:
+            _POSTER_CACHE[key] = await _build_poster(cam_id, sid)
+        except Exception:
+            # Even on render failure return a tiny 1x1 JPEG so the
+            # <img> doesn't render the broken-image icon.
+            _POSTER_CACHE[key] = (
+                b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01"
+                b"\x00\x01\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06"
+                b"\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b"
+                b"\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c"
+                b"\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0"
+                b"\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4"
+                b"\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00"
+                b"\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06"
+                b"\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03"
+                b"\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02"
+                b"\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07\"q\x142\x81"
+                b"\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16"
+                b"\x17\x18\x19\x1a%&'()*456789:CDEFGHIJSTUVWXYZcdefghij"
+                b"stuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94"
+                b"\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8"
+                b"\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3"
+                b"\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7"
+                b"\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea"
+                b"\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00"
+                b"\x08\x01\x01\x00\x00?\x00\xfb\xd0\xff\xd9"
+            )
+    jpg = _POSTER_CACHE[key]
+    return Response(
+        content=jpg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=60"},
+    )
