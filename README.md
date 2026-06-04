@@ -25,6 +25,29 @@ open http://localhost:3030     # React dashboard (use `start` on Windows)
 Reviewer contact: `purplletechchallenge2026@hackerearth.com` (per the
 final v2 problem statement and Resource Center, dated 02-Jun-2026).
 
+### Mandatory deliverables (all in this repo)
+
+| Deliverable | Location |
+| --- | --- |
+| **Event log (JSONL)** | `data/sample_events.jsonl` — 552 real detection events from `STORE_BLR_002`, one JSON object per line, all 7 event types |
+| **README.md** | this file |
+| **DESIGN.md** (incl. AI-Assisted Decisions) | `docs/DESIGN.md` |
+| **CHOICES.md** (model / schema / API decisions) | `docs/CHOICES.md` |
+| Sample POS transactions | `data/sample_pos_transactions.csv` |
+| Store layout | `data/layout/store_layout.json` |
+
+The event log follows the schema in the provided `sample_events.jsonl`:
+`event_id, store_id, camera_id, visitor_id, event_type, timestamp,
+zone_id, dwell_ms, is_staff, confidence, metadata`. Validate it with:
+
+```bash
+python -c "import json; [json.loads(l) for l in open('data/sample_events.jsonl') if l.strip()]; print('valid JSONL')"
+```
+
+> `data/sample_events.json` is the same events wrapped in a
+> `{"events": [...]}` envelope — that's the body shape `POST /events/ingest`
+> expects. The `.jsonl` file is the line-delimited event-log deliverable.
+
 The repo tracks the v2 spec: revised submission deadline, the cleaned
 7-column POS CSV in `data/new_data/POS - sample transactions.csv`
 (101 line items spanning 24 carts), and the same Brigade Bangalore
@@ -173,7 +196,7 @@ pip install -r requirements.txt
 pytest -q --tb=short
 ```
 
-Currently **74 tests** spread across the `tests/` tree. Each file's first lines are a
+Currently **78 tests** spread across the `tests/` tree. Each file's first lines are a
 `# PROMPT:` block (the AI prompt that bootstrapped it) and a `# CHANGES MADE:`
 block (what was edited afterwards and why).
 
@@ -199,9 +222,10 @@ store-intelligence/
 ├── frontend/              React + Vite + TS + Tailwind dashboard
 ├── dashboard/app.py       Streamlit (legacy)
 ├── tests/                 8 test files, 66+ tests
-├── docs/                  DESIGN.md (3669 words) + CHOICES.md
+├── docs/                  DESIGN.md + CHOICES.md
 ├── data/
-│   ├── sample_events.json (incl. ST1008 events for evaluator)
+│   ├── sample_events.jsonl (552-event log deliverable, JSONL)
+│   ├── sample_events.json  (same events, ingest-envelope shape)
 │   ├── sample_pos_transactions.csv  (24 real Brigade transactions)
 │   └── layout/store_layout.json
 ├── docker-compose.yml     api + frontend + dashboard

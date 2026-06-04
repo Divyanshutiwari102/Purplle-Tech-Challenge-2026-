@@ -9,7 +9,7 @@
 > Vercel, backend on Railway) that drives **two real stores** —
 > `STORE_BLR_002` and `ST1008` (Brigade Bangalore) — from one API via a
 > `?store_id=` parameter, with a controllable simulation and a real-CCTV
-> MJPEG feed showing live YOLO boxes. **74 tests pass.**
+> MJPEG feed showing live YOLO boxes. **78 tests pass.**
 
 ---
 
@@ -381,8 +381,8 @@ Every edge case in the problem statement maps to a concrete test:
 | Stale camera | `test_anomalies.py::test_stale_camera_detected_after_10_minutes` | Camera silent > 10 min ⇒ STALE_CAMERA anomaly |
 | Health structure | `test_anomalies.py::test_health_endpoint_structure` | Response includes `status`, `db_status`, `last_event_per_store`, `stale_feeds`, `uptime_seconds` |
 
-29 tests in the original submission. The latest commit ships **74**
-across the `tests/` tree; `pytest -q` now reports `74 passed`.
+29 tests in the original submission. The latest commit ships **78**
+across the `tests/` tree; `pytest -q` now reports `78 passed`.
 
 ---
 
@@ -707,5 +707,5 @@ cause**, and the **specific change** that would close it.
 | 2 | `POST /events/ingest` accepts the sample format | ✓ Verified live (10 ingested first call — 5 STORE_BLR_002 + 5 ST1008 — duplicates on replay) |
 | 3 | `GET /stores/STORE_BLR_002/metrics` returns valid JSON | ✓ Verified; `ST1008` works too via the same handler |
 | 4 | `DESIGN.md` and `CHOICES.md` > 250 words each | ✓ Both well above |
-| 5 | Test files have PROMPT / CHANGES MADE blocks at the top | ✓ All test files; suite is **74 passing** |
+| 5 | Test files have PROMPT / CHANGES MADE blocks at the top | ✓ All test files; suite is **78 passing** |
 | 6 | Multi-store | ✓ Two stores (STORE_BLR_002 + ST1008) selectable in the React dashboard; cameras, metrics and simulation all scope by `?store_id=` |
