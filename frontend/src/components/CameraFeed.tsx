@@ -58,6 +58,7 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
   const [active, setActive] = useState<string>(list[0] ?? "");
   const [bumpKey, setBumpKey] = useState(0);   // forces <img> reload on store/speed change
   const [speed, setSpeed] = useState(1);
+  const [streamLoaded, setStreamLoaded] = useState(false);  // MJPEG first frame arrived?
 
   // Whenever the store changes (or the camera list changes shape),
   // reset the active camera to the new store's first one and bump
@@ -67,7 +68,14 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
       setActive(list[0]);
     }
     setBumpKey((k) => k + 1);
+    setStreamLoaded(false);
   }, [storeId, list.join("|")]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset the loaded flag whenever the active camera or speed changes so
+  // the poster shows again until the new MJPEG delivers its first frame.
+  useEffect(() => {
+    setStreamLoaded(false);
+  }, [active, speed]);
 
   const camMode = cameraInfo?.modes?.[active];
   // While the first /cameras response is in flight, show a "loading" badge
@@ -87,6 +95,11 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
     : `${baseSrc}${fpsParam ? (baseSrc.includes("?") ? `&fps=${fpsParam}` : `?fps=${fpsParam}`) : ""}${
         baseSrc.includes("?") ? `&_k=${bumpKey}` : `?_k=${bumpKey}`
       }`;
+  // Poster is a single cacheable JPEG — used as the always-visible base
+  // layer behind the MJPEG. If the live stream stalls (browser per-host
+  // socket limits, proxy hiccup) the poster keeps a real frame on screen
+  // instead of a black box.
+  const poster = active ? posterSrc(active, storeId) : "";
 
   // Size the video container to match the clip's actual aspect ratio so a
   // portrait clip (e.g. ST1008's billing_area, 960×1080) doesn't render as
@@ -159,12 +172,29 @@ export const CameraFeed: React.FC<Props> = ({ cameraInfo, storeId }) => {
             </span>
           </div>
           {imgSrc ? (
-            <img
-              key={`${storeId}-${active}-${bumpKey}`}
-              src={imgSrc}
-              alt={`${active} ${meta.label}`}
-              className="w-full h-full object-contain"
-            />
+            <>
+              {/* Always-visible base layer: a real poster frame so the
+                  panel is never black even if the MJPEG socket stalls. */}
+              {poster && (
+                <img
+                  src={poster}
+                  alt={`${active} poster`}
+                  className="absolute inset-0 w-full h-full object-contain"
+                />
+              )}
+              {/* Live MJPEG layered on top; fades in once its first
+                  frame loads. */}
+              <img
+                key={`${storeId}-${active}-${bumpKey}`}
+                src={imgSrc}
+                alt={`${active} ${meta.label}`}
+                onLoad={() => setStreamLoaded(true)}
+                onError={() => setStreamLoaded(false)}
+                className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-300 ${
+                  streamLoaded ? "opacity-100" : "opacity-0"
+                }`}
+              />
+            </>
           ) : (
             <div className="w-full h-full flex items-center justify-center text-zinc-500 text-xs">
               No cameras for {storeId}

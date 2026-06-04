@@ -69,6 +69,17 @@ app.include_router(simulation_router)
 @app.on_event("startup")
 async def _startup() -> None:
     init_db()
+    # Enlarge the anyio thread-pool. MJPEG frame decode/encode and
+    # poster rendering run via asyncio.to_thread; the default limiter
+    # is 40 tokens, which a few concurrent camera streams plus the
+    # sim's DB writes can exhaust. 128 gives generous headroom on a
+    # laptop without being reckless.
+    try:
+        import anyio
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 128
+    except Exception:
+        pass
     # Pre-warm camera posters in the background so the first dashboard
     # load after a restart doesn't pay the per-camera render cost on
     # the request path. Fire-and-forget; failures are non-fatal.

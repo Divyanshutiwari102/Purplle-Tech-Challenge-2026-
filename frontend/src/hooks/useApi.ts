@@ -75,12 +75,42 @@ export function useDashboard(storeId: string) {
     return () => { alive = false; };
   }, [storeId]);
 
-  // Polling refresh of summary endpoints. Runs requests sequentially
-  // (not Promise.all) so we never hold > 1 fetch connection in flight
-  // — the rest of the per-host pool stays available for SSE and MJPEG.
+  // Polling refresh of summary endpoints.
+  //
+  // First fetch after a store change runs all endpoints in parallel so
+  // the dashboard repaints fast (the switch feels instant). Steady-state
+  // ticks then run sequentially so we never hold > 1 fetch connection at
+  // once, leaving the browser's per-host pool free for SSE + MJPEG.
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
+
+    const firstPaint = async () => {
+      try {
+        const [m, f, h, a, hl] = await Promise.all([
+          jget<Metrics>(`/stores/${storeId}/metrics`),
+          jget<Funnel>(`/stores/${storeId}/funnel`),
+          jget<Heatmap>(`/stores/${storeId}/heatmap`),
+          jget<Anomalies>(`/stores/${storeId}/anomalies`),
+          jget<Health>(`/health`),
+        ]);
+        if (!alive) return;
+        setMetrics(m);
+        setFunnel(f);
+        setHeatmap(h);
+        setAnomalies(a);
+        setHealth(hl);
+        setQueueSeries((prev) =>
+          [...prev, { ts: Date.now(), depth: m.current_queue_depth }].slice(-120)
+        );
+        setError(null);
+      } catch (e: any) {
+        if (alive) setError(e?.message ?? "request failed");
+      } finally {
+        if (alive) timer = setTimeout(tick, 5000);
+      }
+    };
+
     const tick = async () => {
       try {
         const m = await jget<Metrics>(`/stores/${storeId}/metrics`);
@@ -110,51 +140,70 @@ export function useDashboard(storeId: string) {
       } catch (e: any) {
         if (alive) setError(e?.message ?? "request failed");
       } finally {
-        // 5s instead of 3s — at 3s with sim hammering the DB the
-        // anomalies endpoint sometimes ran longer than the interval.
         if (alive) timer = setTimeout(tick, 5000);
       }
     };
-    tick();
+
+    firstPaint();
     return () => {
       alive = false;
       clearTimeout(timer!);
     };
   }, [storeId]);
 
-  // SSE for the live event ticker.
+  // SSE for the live event ticker. Reconnects automatically on store
+  // change (old connection closed in cleanup) and on transport error.
   useEffect(() => {
-    try {
-      const es = new EventSource(sseUrl(storeId));
-      sseRef.current = es;
-      es.onmessage = (m) => {
-        try {
-          const obj = JSON.parse(m.data);
-          if (obj.type === "sim_event") {
-            setEvents((prev) =>
-              [
-                ...prev,
-                {
-                  ts: obj.ts,
-                  event_type: obj.event_type,
-                  visitor_id: obj.visitor_id,
-                  camera_id: obj.camera_id,
-                  zone_id: obj.zone_id,
-                },
-              ].slice(-200)
-            );
+    let es: EventSource | null = null;
+    let closed = false;
+    let retry: ReturnType<typeof setTimeout>;
+
+    const connect = () => {
+      if (closed) return;
+      try {
+        es = new EventSource(sseUrl(storeId));
+        sseRef.current = es;
+        es.onmessage = (m) => {
+          try {
+            const obj = JSON.parse(m.data);
+            if (obj.type === "sim_event") {
+              setEvents((prev) =>
+                [
+                  ...prev,
+                  {
+                    ts: obj.ts,
+                    event_type: obj.event_type,
+                    visitor_id: obj.visitor_id,
+                    camera_id: obj.camera_id,
+                    zone_id: obj.zone_id,
+                  },
+                ].slice(-200)
+              );
+            }
+          } catch {
+            /* ignore parse errors (e.g. heartbeats) */
           }
-        } catch {
-          /* ignore parse errors */
-        }
-      };
-      es.onerror = () => {
-        // EventSource auto-reconnects.
-      };
-      return () => es.close();
-    } catch {
-      // SSE not supported / blocked. Polling still keeps the UI live.
-    }
+        };
+        es.onerror = () => {
+          // Browser usually auto-reconnects, but if the connection is
+          // fully closed, force a fresh one after a short backoff.
+          if (es && es.readyState === EventSource.CLOSED && !closed) {
+            es.close();
+            clearTimeout(retry);
+            retry = setTimeout(connect, 2000);
+          }
+        };
+      } catch {
+        // SSE unsupported / blocked — polling still keeps the UI live.
+      }
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      if (es) es.close();
+    };
   }, [storeId]);
 
   return { metrics, funnel, heatmap, anomalies, health, events, queueSeries, cameraInfo, error, apiBase };
