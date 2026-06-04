@@ -372,24 +372,49 @@ def _render_synth(cam_id: str, frame_idx: int, actors: List[_Actor],
 # ---------------------------------------------------------------------
 # Real-frame renderer
 # ---------------------------------------------------------------------
+# Frames are downscaled to this max width before drawing + encoding.
+# 1080p decode+draw+JPEG is ~40-50 ms/frame on CPU, which can't sustain
+# a smooth stream; at 960px it's ~15-20 ms and the JPEG is ~1/3 the
+# size, so playback is fluid and bandwidth drops sharply. Detection
+# bboxes are in source-pixel coords, so we scale them by the same factor.
+_STREAM_MAX_W = 960
+
+
 def _render_real(frame_bgr, frame_idx: int, boxes: list, fps: float,
                  cam_id: str, role: str, zones: List[dict]) -> bytes:
     from PIL import Image, ImageDraw
     import numpy as np  # type: ignore
+    src_h, src_w = frame_bgr.shape[:2]
+    scale = 1.0
+    if src_w > _STREAM_MAX_W:
+        scale = _STREAM_MAX_W / float(src_w)
+        import cv2  # type: ignore
+        new_w = _STREAM_MAX_W
+        new_h = int(round(src_h * scale))
+        frame_bgr = cv2.resize(frame_bgr, (new_w, new_h),
+                               interpolation=cv2.INTER_AREA)
     # cv2 returns BGR; convert to RGB for PIL.
     rgb = frame_bgr[..., ::-1].copy()
     img = Image.fromarray(rgb)
     fw, fh = img.size
     draw = ImageDraw.Draw(img, "RGBA")
+    # Zone polygons are in source coords — scale them too.
+    if scale != 1.0 and zones:
+        zones = [
+            {**z, "polygon": [[x * scale, y * scale]
+                              for x, y in (z.get("polygon") or [])]}
+            for z in zones
+        ]
     _draw_overlays(draw, fw, fh, role, zones)
     persons = 0
     for b in boxes or []:
         x1, y1, x2, y2, conf, tid = b
-        _draw_bbox(draw, x1, y1, x2, y2, float(conf), int(tid))
+        _draw_bbox(draw, x1 * scale, y1 * scale, x2 * scale, y2 * scale,
+                   float(conf), int(tid))
         persons += 1
     _draw_hud(draw, fw, cam_id, role, frame_idx, fps, persons, "real")
     out = io.BytesIO()
-    img.save(out, format="JPEG", quality=72)
+    img.save(out, format="JPEG", quality=70)
     return out.getvalue()
 
 
@@ -431,8 +456,23 @@ async def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
     src_fps = float(det.get("fps") or 30.0)
     stride = int(det.get("stride") or 1)
 
-    play_fps = target_fps if target_fps > 0 else src_fps
+    # Real-mode playback is capped: 1080p decode+draw+encode can't
+    # sustain 30 fps on CPU, so we render at ~15 fps. To keep the clip
+    # playing at *real-time speed* (not slow motion), we advance the
+    # source frame index by `src_step` per emitted frame so the wall
+    # clock matches the footage. With speed multipliers (target_fps>0
+    # via ?fps=) we scale src_step up.
+    REAL_PLAY_FPS = 15.0
+    if target_fps and target_fps > 0:
+        # Caller asked for a specific rate (speed control). Honour it
+        # but keep it sane for CPU.
+        play_fps = min(target_fps, 30.0)
+    else:
+        play_fps = min(src_fps, REAL_PLAY_FPS)
     period = 1.0 / max(1.0, play_fps)
+    # How many source frames to advance per emitted frame so playback
+    # tracks real time. e.g. 30 fps source @ 15 fps playback -> step 2.
+    src_step = max(1, int(round(src_fps / play_fps)))
 
     # Build a sorted list of detection frame indices for fast lookup.
     det_indices = sorted(by_frame.keys())
@@ -486,11 +526,19 @@ async def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
     if not cap.isOpened():
         return
 
-    def _read_one():
+    def _read_step():
+        """Read one frame to render, then skip (src_step-1) frames so
+        playback tracks real time. Loops the clip at EOF."""
         ok, frame = cap.read()
         if not ok:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ok, frame = cap.read()
+        # Drop the in-between frames (decode is cheap relative to render).
+        for _ in range(src_step - 1):
+            grabbed = cap.grab()
+            if not grabbed:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                break
         return ok, frame
 
     emitted = 0
@@ -500,7 +548,7 @@ async def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
             # Decode + render are CPU-heavy at 1080p; run them off the
             # event loop so other concurrent streams (and the rest of
             # the API) keep responding.
-            ok, frame = await asyncio.to_thread(_read_one)
+            ok, frame = await asyncio.to_thread(_read_step)
             if not ok:
                 # Stream is over and we couldn't loop — bail.
                 return
@@ -514,7 +562,7 @@ async def _stream_real(clip_path: Path, det_path: Path, cam_id: str,
             emitted += 1
             if max_frames is not None and emitted >= max_frames:
                 return
-            frame_idx += 1
+            frame_idx += src_step
             await asyncio.sleep(period)
     except (BrokenPipeError, ConnectionResetError, GeneratorExit):
         return
