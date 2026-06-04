@@ -1,8 +1,15 @@
 # Store Intelligence — Design
 
 > Real-time analytics for Apex Retail's offline stores. Raw CCTV → structured
-> events → queryable REST API → live dashboard. One command (`docker compose up`)
-> starts everything.
+> events → queryable REST API → live React dashboard. One command
+> (`docker compose up`) starts everything.
+>
+> **What's live today:** a YOLOv8n detection pipeline, a FastAPI ingest +
+> metrics + anomaly API, an SSE event stream, and a React dashboard (on
+> Vercel, backend on Railway) that drives **two real stores** —
+> `STORE_BLR_002` and `ST1008` (Brigade Bangalore) — from one API via a
+> `?store_id=` parameter, with a controllable simulation and a real-CCTV
+> MJPEG feed showing live YOLO boxes. **74 tests pass.**
 
 ---
 
@@ -16,9 +23,11 @@ Every component in this system either improves the **accuracy** of that number
 
 Constraints we built against:
 
-- Take-home, 48-hour window, single laptop (CPU-only)
-- 5 stores × 3 cameras × 20 minutes (representative sample)
-- 1080p @ 15fps, anonymised, with realistic edge cases (groups, staff, re-entry, occlusion, queue buildup, empty periods, camera overlap)
+- Take-home window, single laptop (CPU-only)
+- Representative sample: the v2 resource center shipped two stores —
+  STORE_BLR_002 (5 cameras) and ST1008 / Brigade Bangalore (4 cameras) —
+  plus a cleaned per-line-item POS CSV (24 carts, ₹34,331.71)
+- 1080p @ 25–30fps, anonymised, with realistic edge cases (groups, staff, re-entry, occlusion, queue buildup, empty periods, camera overlap)
 - Output must be a containerised, production-aware API
 
 ---
@@ -372,8 +381,8 @@ Every edge case in the problem statement maps to a concrete test:
 | Stale camera | `test_anomalies.py::test_stale_camera_detected_after_10_minutes` | Camera silent > 10 min ⇒ STALE_CAMERA anomaly |
 | Health structure | `test_anomalies.py::test_health_endpoint_structure` | Response includes `status`, `db_status`, `last_event_per_store`, `stale_feeds`, `uptime_seconds` |
 
-29 tests in the original submission. The latest commit ships **72**
-across 11 files; `pytest -q` now reports `72 passed`.
+29 tests in the original submission. The latest commit ships **74**
+across the `tests/` tree; `pytest -q` now reports `74 passed`.
 
 ---
 
@@ -694,8 +703,9 @@ cause**, and the **specific change** that would close it.
 
 | # | Requirement | Status |
 |---|---|---|
-| 1 | `docker compose up` works clean, no manual steps beyond `git clone` | ✓ Both containers boot healthy on 8000 / 8501 |
-| 2 | `POST /events/ingest` accepts the sample format | ✓ Verified live (5 ingested first call, 5 duplicates on replay) |
-| 3 | `GET /stores/STORE_BLR_002/metrics` returns valid JSON | ✓ Verified |
+| 1 | `docker compose up` works clean, no manual steps beyond `git clone` | ✓ All three containers (api / frontend / dashboard) boot healthy on 8000 / 3030 / 8501 |
+| 2 | `POST /events/ingest` accepts the sample format | ✓ Verified live (10 ingested first call — 5 STORE_BLR_002 + 5 ST1008 — duplicates on replay) |
+| 3 | `GET /stores/STORE_BLR_002/metrics` returns valid JSON | ✓ Verified; `ST1008` works too via the same handler |
 | 4 | `DESIGN.md` and `CHOICES.md` > 250 words each | ✓ Both well above |
-| 5 | Test files have PROMPT / CHANGES MADE blocks at the top | ✓ All 4 test files |
+| 5 | Test files have PROMPT / CHANGES MADE blocks at the top | ✓ All test files; suite is **74 passing** |
+| 6 | Multi-store | ✓ Two stores (STORE_BLR_002 + ST1008) selectable in the React dashboard; cameras, metrics and simulation all scope by `?store_id=` |

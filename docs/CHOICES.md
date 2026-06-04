@@ -1,9 +1,13 @@
-# CHOICES.md — three decisions, with reasoning
+# CHOICES.md — key engineering decisions, with reasoning
 
 > Specific numbers below come from CPU benchmarks on my own laptop
-> (Intel i7-13th gen, no GPU). The clips I worked from are 1920×1080
-> at 25–30 fps, 2.1–2.5 minutes each, 5 clips total — exactly what the
-> challenge ZIP delivers.
+> (Intel i7-13th gen, no GPU). The footage is 1920×1080 at 25–30 fps,
+> 2.1–2.5 minutes per clip. The challenge shipped two stores in the
+> v2 resource center: **STORE_BLR_002** (the suggested layout, 5
+> cameras) and **ST1008 / Brigade Bangalore** (Store 2, 4 cameras),
+> and a cleaned per-line-item `pos_transactions.csv` (101 line items
+> spanning 24 carts, ₹34,331.71). The dashboard drives both stores
+> from one API via a `?store_id=` parameter.
 
 ---
 
@@ -192,3 +196,74 @@ If any of the following happen:
 Until then, SQLite is honest engineering: it does the job with one
 file and one container, and the migration is mapped out for the day
 the assumptions break.
+
+---
+
+## Decision 4: Real-time delivery — SSE + pre-computed MJPEG, not WebSockets or live inference
+
+### The two real-time surfaces
+
+The dashboard has two independent real-time needs, and I made a
+different call for each.
+
+1. **Metric/event updates** (visitors, conversion, the live ticker).
+2. **The camera feed** with YOLO boxes that follow people.
+
+### Updates: Server-Sent Events, not WebSockets
+
+| Option | Why / why not |
+| --- | --- |
+| **SSE** (chosen) | One-way server→client is exactly the shape of the need. Rides plain HTTP, passes through nginx with `proxy_buffering off`, auto-reconnects in the browser, and needs no upgrade handshake. One `asyncio.Queue` per subscriber, fan-out on ingest. |
+| WebSockets | Bidirectional — we don't need client→server over the socket; the control plane (start/stop sim) is fine as plain POST. Extra handshake + message router for no benefit at this scale. |
+| Polling only | Already used as the resilient fallback (3–5 s). But polling alone can't show the per-event ticker without hammering the API. SSE complements it. |
+
+The browser keeps **both** a 5 s poll (authoritative numbers) and the
+SSE stream (instant event ticker). If SSE drops, polling still keeps
+the dashboard live — defence in depth.
+
+### Camera feed: pre-compute detections once, replay as downscaled MJPEG
+
+Live YOLO at 1080p on CPU is ~80–120 ms/frame — it would saturate the
+API and starve every other request. So:
+
+1. **`pipeline/precompute_detections.py`** runs YOLOv8n + an IoU
+   tracker over each clip **once** and writes a frame-indexed JSON of
+   `[x1,y1,x2,y2,conf,track_id]`. The boxes are real model output, not
+   faked — they're just computed ahead of time.
+2. The MJPEG endpoint decodes the mp4 and overlays those boxes,
+   **interpolating** bbox positions between detection samples so a
+   box recorded every 5th frame still slides smoothly.
+
+Two numbers that drove the streaming tuning:
+
+- **Downscale to 960 px width before encoding.** A 1080p frame's
+  decode + draw + JPEG encode is ~40–50 ms on CPU; at 960 px it's
+  ~15–20 ms and the JPEG is ~1/3 the size (~112 KB vs ~300 KB). bbox
+  and zone-polygon coordinates are scaled by the same factor so
+  overlays stay aligned.
+- **Cap real-mode playback at 15 fps and skip source frames** so the
+  clip plays at real-time speed instead of slow-motion. 30 fps was
+  unachievable on CPU and caused the visible stutter; 15 fps is fluid
+  and sustainable.
+
+### Concurrency: async generators + a 128-token thread pool
+
+Each MJPEG stream is an **async** generator; cv2 decode and PIL render
+run via `asyncio.to_thread`, pacing via `asyncio.sleep`. A *sync*
+`StreamingResponse` generator would reserve one anyio pool thread for
+the entire life of the stream — open a few camera panels across two
+stores and the default 40-thread pool starves the whole API. I raised
+the limiter to 128 and moved the blocking work into threads, so dozens
+of concurrent streams coexist with the polling + SSE traffic.
+
+Thumbnails use a **single cached poster JPEG** per camera (not an
+MJPEG socket each) so the browser's six-connections-per-host budget
+isn't blown by the 4–5 thumbnail strip. Posters are pre-warmed at
+startup, so the first dashboard load after a restart is instant.
+
+### What breaks at scale
+
+The SSE fan-out is in-process, so it doesn't survive multiple API
+workers — at scale the subscriber registry moves to Redis pub/sub and
+the camera feeds move to a dedicated media service (or WebRTC/HLS via
+a streaming server), leaving the API to do only JSON.

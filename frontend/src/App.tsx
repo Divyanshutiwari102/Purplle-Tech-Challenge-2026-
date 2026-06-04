@@ -19,17 +19,20 @@ const App: React.FC = () => {
   const [simSpeed, setSimSpeed] = useState(1);
 
   // Reflect the simulation manager's state across page reloads and
-  // store switches. Without this, hitting "Start 1×" on STORE_BLR_002,
-  // switching to ST1008 and clicking "Start 1×" again silently no-ops
-  // because the manager is already running for the other store.
+  // store switches. The sim is a singleton (one store at a time), so
+  // we only treat it as "running" for THIS store when the manager's
+  // active store matches the one selected here. Otherwise the second
+  // store would show "Stop" instead of "Start" and the button would
+  // appear dead.
   React.useEffect(() => {
     let alive = true;
     fetch(`/api/simulation/status`)
       .then((r) => r.json())
       .then((s) => {
         if (!alive) return;
-        setSimRunning(!!s.running);
-        if (s.speed) setSimSpeed(Number(s.speed));
+        const runningHere = !!s.running && s.store_id === storeId;
+        setSimRunning(runningHere);
+        if (runningHere && s.speed) setSimSpeed(Number(s.speed));
       })
       .catch(() => {});
     return () => { alive = false; };
