@@ -562,8 +562,19 @@ async def _stream_synth(cam_id: str, store_id: str, target_fps: float,
 # ---------------------------------------------------------------------
 # Public mode helpers (also used by /cameras to advertise capabilities)
 # ---------------------------------------------------------------------
+# camera_mode reads + JSON-parses the (potentially large) detection
+# file to count populated frames. That file is static at runtime, so
+# the result is cached per (store, cam). /cameras was ~2s without this
+# because it called camera_mode for every camera on every request.
+_CAMERA_MODE_CACHE: Dict[Tuple[str, str], dict] = {}
+
+
 def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
     sid = _resolve_store_id(store_id)
+    ckey = (sid, cam_id)
+    cached = _CAMERA_MODE_CACHE.get(ckey)
+    if cached is not None:
+        return cached
     cfg = _camera_config(cam_id, sid) or {}
     fw, fh = (cfg.get("frame_size") or [_DEFAULT_W, _DEFAULT_H])
     role = cfg.get("role", "FLOOR")
@@ -581,7 +592,7 @@ def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
         # in portrait will report [960, 1080] which the React panel
         # uses to size its container correctly.
         det_size = d.get("frame_size") or [fw, fh]
-        return {
+        result = {
             "mode": "real",
             "role": role,
             "clip": clip.name,
@@ -590,19 +601,22 @@ def camera_mode(cam_id: str, store_id: Optional[str] = None) -> dict:
             "frame_w": int(det_size[0]),
             "frame_h": int(det_size[1]),
         }
-    return {
-        "mode": "sim",
-        "role": role,
-        "frame_w": int(fw),
-        "frame_h": int(fh),
-    }
+    else:
+        result = {
+            "mode": "sim",
+            "role": role,
+            "frame_w": int(fw),
+            "frame_h": int(fh),
+        }
+    _CAMERA_MODE_CACHE[ckey] = result
+    return result
 
 
 # ---------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------
 @router.get("/cameras")
-def list_cameras(store_id: Optional[str] = None) -> dict:
+async def list_cameras(store_id: Optional[str] = None) -> dict:
     """
     Cameras advertised by the API.
 
@@ -611,17 +625,26 @@ def list_cameras(store_id: Optional[str] = None) -> dict:
     With `?store_id=...` returns the cameras for that store; unknown ids
     fall back to the default store rather than 404 — keeps the dashboard
     responsive while a freshly-added store is still being detected on.
+
+    camera_mode results are cached per (store, cam); the first call
+    after a restart parses each detection file once, subsequent calls
+    are served from memory.
     """
+    import asyncio
     sid = _resolve_store_id(store_id)
     cams = _public_camera_ids(sid)
     if not cams:
         # Layout is empty / unreadable — fall back to synthetic ids.
         cams = list(_FALLBACK_CAMERAS.keys())
+    # Run the (possibly disk-touching) mode lookups off the event loop.
+    modes = await asyncio.to_thread(
+        lambda: {c: camera_mode(c, sid) for c in cams}
+    )
     return {
         "store_id": sid,
         "stores": _list_store_ids(),
         "cameras": cams,
-        "modes": {c: camera_mode(c, sid) for c in cams},
+        "modes": modes,
     }
 
 
@@ -789,17 +812,25 @@ async def camera_poster(cam_id: str,
 
 
 async def prewarm_posters() -> None:
-    """Render every store's posters into _POSTER_CACHE up-front.
+    """Render every store's posters into _POSTER_CACHE up-front, and
+    warm the camera_mode cache too.
 
     Called from the app's startup hook in a background task. Without
     this, the first dashboard load after a container restart pays the
-    cv2-seek + render cost (~1s each) for all 9 cameras at once while
-    the browser is also polling — which is what made the first reload
-    feel slow. Pre-warming moves that cost to boot time (off the
-    request path) so the first paint is instant.
+    cv2-seek + render cost (~1s each) for all cameras at once, plus a
+    detection-file parse per camera in /cameras — which is what made
+    the first reload feel slow. Pre-warming moves that cost to boot
+    time (off the request path) so the first paint is instant.
     """
+    import asyncio
     for sid in (_list_store_ids() or ["STORE_BLR_002"]):
         for cam in _public_camera_ids(sid):
+            # Warm the /cameras metadata cache (parses detection file once).
+            try:
+                await asyncio.to_thread(camera_mode, cam, sid)
+            except Exception:
+                pass
+            # Warm the poster image cache.
             key = (sid, cam)
             if key in _POSTER_CACHE:
                 continue
